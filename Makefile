@@ -25,7 +25,7 @@ OBJ := $(patsubst %.cpp,$(OUTDIR)/%.o,$(notdir $(SRC)))
 DEP := Makefile.dep
 
 # file disambiguity is achieved via the .PHONY directive
-.PHONY : all clean dbg
+.PHONY : all clean dbg scope test-scope
 
 all: CXXFLAGS += -O3 -mtune=native
 all: dir $(target)
@@ -41,6 +41,12 @@ $(target): $(OBJ)
 
 clean:
 	$(RM) $(target) $(dep_file) $(OBJ)
+
+scope: all
+	python3 scope.py config/scope_example.json --json-output results/scope_example.json
+
+test-scope:
+	python3 -m unittest discover -s tests -v
 
 $(OUTDIR)/%.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(DBG) $(INC) -c $< -o $@

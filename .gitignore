@@ -11,3 +11,9 @@
 *.lai
 *.la
 *.a
+
+# Local SCOPE/DESTINY build artifacts
+destiny
+Makefile.dep
+__pycache__/
+*.pyc

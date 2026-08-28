@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "source": "User-provided Device Library screenshots (2026-08-28)",
+  "semantics": {
+    "dynamic_energy_unit": "fJ/bit/access",
+    "leakage_unit": "per data bit unless a model is named",
+    "refresh_unit": "per data bit",
+    "greater_than_values": "stored as a conservative numeric lower bound",
+    "edram_read_functions": "evaluated by the matching DESTINY eDRAM instance at its configured Nrow"
+  },
+  "devices": {
+    "STT-MRAM": {
+      "family": "MRAM",
+      "read_latency": {"model": "constant", "value_ns": 10.0, "approximate": false},
+      "read_energy": {"model": "constant", "value_fj_per_bit": 41.0},
+      "write_latency": {"model": "constant", "value_ns": 20.0, "approximate": true},
+      "write_energy": {"model": "constant", "value_fj_per_bit": 100.0},
+      "leakage": {"model": "constant", "value_pw_per_bit": 0.0},
+      "refresh": {"model": "constant", "value_aw_per_bit": 0.0},
+      "endurance": {"model": "constant", "writes_per_line": 1000000000.0},
+      "variation": "low",
+      "density_f2": 53.0,
+      "density_note": "consider high write current",
+      "m3d_scalability": "neutral/unspecified"
+    },
+    "SOT-MRAM": {
+      "family": "MRAM",
+      "read_latency": {"model": "constant", "value_ns": 1.0, "approximate": true},
+      "read_energy": {"model": "constant", "value_fj_per_bit": 18.3},
+      "write_latency": {"model": "constant", "value_ns": 10.0, "approximate": true},
+      "write_energy": {"model": "constant", "value_fj_per_bit": 102.0},
+      "leakage": {"model": "constant", "value_pw_per_bit": 0.0},
+      "refresh": {"model": "constant", "value_aw_per_bit": 0.0},
+      "endurance": {"model": "constant", "writes_per_line": 100000000000000.0},
+      "variation": "low",
+      "density_f2": 100.0,
+      "density_note": "consider high write current",
+      "m3d_scalability": "neutral/unspecified"
+    },
+    "SRAM": {
+      "family": "SRAM",
+      "read_latency": {"model": "constant", "value_ns": 1.0, "approximate": true},
+      "read_energy": {"model": "constant", "value_fj_per_bit": 21.5},
+      "write_latency": {"model": "constant", "value_ns": 1.0, "approximate": true},
+      "write_energy": {"model": "constant", "value_fj_per_bit": 16.2},
+      "leakage": {"model": "constant", "value_pw_per_bit": 27.5},
+      "refresh": {"model": "constant", "value_aw_per_bit": 0.0},
+      "endurance": {"model": "lower_bound", "writes_per_line": 1000000000000000.0},
+      "variation": "low",
+      "density_f2": 140.0,
+      "density_note": "",
+      "m3d_scalability": "N/A"
+    },
+    "Si-eDRAM": {
+      "family": "eDRAM",
+      "read_latency": {"model": "destiny_Lr_s_Nrow"},
+      "read_energy": {"model": "destiny_Er_Nrow"},
+      "write_latency": {"model": "constant", "value_ns": 2.0, "approximate": false},
+      "write_energy": {"model": "constant", "value_fj_per_bit": 2.5, "approximate": true},
+      "leakage": {
+        "model": "capacitor_refresh",
+        "capacitance_f": 1.3e-14,
+        "delta_v": 0.1,
+        "reference_retention_us": 10.0
+      },
+      "refresh": {"model": "same_as_leakage_reference"},
+      "endurance": {"model": "lower_bound", "writes_per_line": 1000000000000000.0},
+      "variation": "low",
+      "density_f2": 35.0,
+      "density_note": "layout XL",
+      "m3d_scalability": "N/A"
+    },
+    "TFET-eDRAM": {
+      "family": "eDRAM",
+      "read_latency": {"model": "destiny_Lr_s_Nrow"},
+      "read_energy": {"model": "destiny_Er_Nrow"},
+      "write_latency": {"model": "constant", "value_ns": 3.0, "approximate": false},
+      "write_energy": {"model": "constant", "value_fj_per_bit": 10.0, "approximate": true},
+      "leakage": {"model": "same_as_refresh"},
+      "refresh": {"model": "constant", "value_aw_per_bit": 100.0, "approximate": true},
+      "endurance": {"model": "lower_bound", "writes_per_line": 1000000000000000.0},
+      "variation": "low",
+      "density_f2": 35.0,
+      "density_note": "layout XL",
+      "m3d_scalability": "N/A"
+    },
+    "2D-eDRAM": {
+      "family": "eDRAM",
+      "read_latency": {
+        "model": "destiny_Lr_s_Nrow",
+        "hybrid": "Lr,s(Nrow)",
+        "pure": "Lr,d(Nrow)",
+        "selected_path": "hybrid"
+      },
+      "read_energy": {"model": "destiny_Er_Nrow"},
+      "write_latency": {"model": "constant", "value_ns": 20.0, "approximate": false},
+      "write_energy": {"model": "constant", "value_fj_per_bit": 10.0, "approximate": true},
+      "leakage": {"model": "same_as_refresh"},
+      "refresh": {"model": "constant", "value_aw_per_bit": 100.0, "approximate": true},
+      "endurance": {"model": "lower_bound", "writes_per_line": 1000000000000000.0},
+      "variation": "low",
+      "density_f2": 35.0,
+      "density_note": "planar",
+      "m3d_scalability": "1 tier 2TOC"
+    },
+    "OSFET-eDRAM": {
+      "family": "eDRAM",
+      "read_latency": {
+        "model": "destiny_Lr_s_Nrow",
+        "hybrid": "Lr,s(Nrow)",
+        "pure": "Lr,o(Nrow)",
+        "selected_path": "hybrid"
+      },
+      "read_energy": {"model": "destiny_Er_Nrow"},
+      "write_latency": {"model": "constant", "value_ns": 10.0, "approximate": true},
+      "write_energy": {"model": "constant", "value_fj_per_bit": 10.0, "approximate": true},
+      "leakage": {"model": "same_as_refresh"},
+      "refresh": {"model": "constant", "value_aw_per_bit": 100.0, "approximate": true},
+      "endurance": {"model": "BTI_required", "writes_per_line": null},
+      "variation": "high BTI-variation",
+      "density_f2": 35.0,
+      "density_divisor": "N stacked tiers",
+      "density_note": "35/N (stacked)",
+      "m3d_scalability": "4 tier 2TOC"
+    }
+  }
+}
