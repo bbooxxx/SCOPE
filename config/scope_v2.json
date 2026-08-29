@@ -1,0 +1,188 @@
+{
+  "name": "SCOPE v2 automatic seven-device search",
+  "destiny_binary": "destiny",
+  "device_library": "config/device_library.json",
+  "selected_workload": "attention",
+  "core_to_l1_latency_ns": 0.0,
+  "refill_on_critical_path": false,
+  "constraints": {
+    "ber_max": 1e-8
+  },
+  "capacity": {
+    "mode": "density_scaled",
+    "destiny_power_of_two": true,
+    "sram_density_f2": 140.0,
+    "sram_baseline_bytes": {
+      "L1": 32768,
+      "L2": 1048576,
+      "L3": 4194304
+    }
+  },
+  "auto_selection": {
+    "enabled": true,
+    "devices": [
+      "STT-MRAM",
+      "SOT-MRAM",
+      "SRAM",
+      "Si-eDRAM",
+      "TFET-eDRAM",
+      "2D-eDRAM",
+      "OSFET-eDRAM"
+    ],
+    "refresh_interval_us": 10.0,
+    "retention_time_us": 10.0,
+    "bti_endurance_writes_per_line": 1e12
+  },
+  "workloads": {
+    "attention": {
+      "description": "OpenVLA/Llama-2-7B BF16 tiled self-attention behavior-level profile",
+      "read_fraction": 0.82,
+      "memory_access_rate_per_s": 1000000000,
+      "lifetime_seconds": 157680000,
+      "operator_shape": {
+        "hidden_size": 4096,
+        "num_attention_heads": 32,
+        "head_dim": 128,
+        "tile_tokens": 64,
+        "bytes_per_element": 2
+      },
+      "hit_rate_model": {
+        "mode": "operator",
+        "reuse_window_bytes": {
+          "L1": 65536,
+          "L2": 2097152,
+          "L3": 8388608
+        },
+        "locality_factor": {
+          "L1": 2.0,
+          "L2": 2.0,
+          "L3": 2.0
+        },
+        "reference_associativity": {
+          "L1": 8,
+          "L2": 8,
+          "L3": 16
+        },
+        "max_hit_rate": 0.95,
+        "offchip_writebacks_per_request": 0.002
+      },
+      "guidance": {
+        "name": "balanced_latency_power",
+        "weights": {
+          "latency": 1.0,
+          "power": 1.0
+        },
+        "normalizers": {
+          "latency": 10.0,
+          "power": 100.0
+        }
+      }
+    },
+    "ffn": {
+      "description": "OpenVLA/Llama-2-7B BF16 tiled feed-forward behavior-level profile",
+      "read_fraction": 0.67,
+      "memory_access_rate_per_s": 1500000000,
+      "lifetime_seconds": 157680000,
+      "operator_shape": {
+        "hidden_size": 4096,
+        "intermediate_size": 11008,
+        "tile_tokens": 64,
+        "bytes_per_element": 2
+      },
+      "hit_rate_model": {
+        "mode": "operator",
+        "reuse_window_bytes": {
+          "L1": 81920,
+          "L2": 2621440,
+          "L3": 10485760
+        },
+        "locality_factor": {
+          "L1": 2.5,
+          "L2": 2.5,
+          "L3": 2.5
+        },
+        "reference_associativity": {
+          "L1": 8,
+          "L2": 8,
+          "L3": 16
+        },
+        "max_hit_rate": 0.95,
+        "offchip_writebacks_per_request": 0.003
+      },
+      "guidance": {
+        "name": "ffn_power_weighted",
+        "weights": {
+          "latency": 1.0,
+          "power": 2.0
+        },
+        "normalizers": {
+          "latency": 10.0,
+          "power": 100.0
+        }
+      }
+    }
+  },
+  "layers": [
+    {
+      "name": "L1",
+      "associativity": 8,
+      "line_bytes": 64,
+      "replacement_policy": "LRU",
+      "banks": 1,
+      "ber": 1e-12,
+      "wear_leveling_efficiency": 1.0,
+      "estimated_writebacks_per_request": 0.0,
+      "allow_high_variation": false
+    },
+    {
+      "name": "L2",
+      "associativity": 8,
+      "line_bytes": 64,
+      "replacement_policy": "LRU",
+      "banks": 4,
+      "ber": 1e-10,
+      "wear_leveling_efficiency": 1.0,
+      "estimated_writebacks_per_request": 0.02,
+      "allow_high_variation": false
+    },
+    {
+      "name": "L3",
+      "associativity": 16,
+      "line_bytes": 64,
+      "replacement_policy": "LRU",
+      "banks": 8,
+      "ber": 1e-9,
+      "wear_leveling_efficiency": 0.9,
+      "estimated_writebacks_per_request": 0.01,
+      "allow_high_variation": false
+    }
+  ],
+  "crossbars": [
+    {
+      "name": "L1-L2 ideal crossbar",
+      "request_cycles": 1,
+      "response_cycles": 1,
+      "clock_ghz": 1.0,
+      "energy_pj_per_bit": 0.201,
+      "transaction_bits": 576
+    },
+    {
+      "name": "L2-L3 ideal crossbar",
+      "request_cycles": 1,
+      "response_cycles": 1,
+      "clock_ghz": 1.0,
+      "energy_pj_per_bit": 0.201,
+      "transaction_bits": 576
+    }
+  ],
+  "off_chip": {
+    "latency_ns": 45.812,
+    "energy_nj": 10.24
+  },
+  "instruction_cases": [
+    {"op": "load", "hit_level": "L1"},
+    {"op": "store", "hit_level": "L2"},
+    {"op": "load", "hit_level": "L3"},
+    {"op": "load", "hit_level": "OFF"}
+  ]
+}

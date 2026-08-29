@@ -1,5 +1,6 @@
 import json
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import scope
@@ -31,7 +32,7 @@ def layer(name: str, latency: float, energy: float) -> scope.LayerSpec:
         name=name,
         device="SRAM",
         device_family="SRAM",
-        destiny_config=ROOT / "config/scope_l1_sram.cfg",
+        destiny_config=ROOT / "config/devices/sram.cfg",
         capacity_bytes=4096,
         associativity=1,
         line_bytes=64,
@@ -76,10 +77,29 @@ class ScopeTests(unittest.TestCase):
         required = {
             "read_latency", "read_energy", "write_latency", "write_energy",
             "leakage", "refresh", "endurance", "variation", "density_f2",
-            "m3d_scalability",
+            "m3d_scalability", "destiny_cfg",
         }
         for device in self.library.values():
             self.assertTrue(required.issubset(device))
+
+    def test_seven_cell_and_cfg_files_contain_all_device_metrics(self) -> None:
+        for entry in self.library.values():
+            cfg = ROOT / entry["destiny_cfg"]
+            self.assertTrue(cfg.is_file())
+            text = cfg.read_text(encoding="utf-8")
+            cell_name = next(
+                line.split(":", 1)[1].strip()
+                for line in text.splitlines()
+                if line.startswith("-MemoryCellInputFile:")
+            )
+            cell_text = (cfg.parent / cell_name).read_text(encoding="utf-8")
+            for marker in (
+                "ScopeDevice", "ScopeRead", "ScopeWrite", "ScopeLeakage",
+                "ScopeRefresh", "ScopeEndurance", "ScopeVariation",
+                "ScopeDensity", "ScopeM3DScalability",
+            ):
+                self.assertIn(marker, text)
+                self.assertIn(marker, cell_text)
 
     def test_sram_table_leakage_is_applied_per_data_bit(self) -> None:
         leakage, refresh = scope._power_from_device_library(
@@ -87,6 +107,96 @@ class ScopeTests(unittest.TestCase):
         )
         self.assertAlmostEqual(leakage, 0.00720896)
         self.assertEqual(refresh, 0.0)
+
+    def test_effective_static_power_does_not_reuse_raw_tag_leakage(self) -> None:
+        raw = metrics(1.0, 0.1, leakage=250.0)
+        effective, device_leakage, _ = scope._apply_device_library(
+            raw, self.library["SOT-MRAM"], 4096, 64, 0.0
+        )
+        self.assertEqual(device_leakage, 0.0)
+        self.assertEqual(effective.leakage_power_mw, 0.0)
+        self.assertEqual(effective.tag_array_leakage_power_mw, 0.0)
+        self.assertEqual(raw.tag_array_leakage_power_mw, 250.0)
+        edram_leakage, edram_refresh = scope._power_from_device_library(
+            self.library["TFET-eDRAM"], 4 * 1024 * 1024 * 8, 10.0
+        )
+        self.assertEqual(edram_leakage, 0.0)
+        self.assertGreater(edram_refresh, 0.0)
+
+    def test_operator_hit_rates_are_capacity_aware_and_reasonable(self) -> None:
+        layers = [
+            replace(layer("L1", 1.0, 0.1), capacity_bytes=32768,
+                    associativity=8),
+            replace(layer("L2", 1.0, 0.1), capacity_bytes=1048576,
+                    associativity=8),
+            replace(layer("L3", 1.0, 0.1), capacity_bytes=4194304,
+                    associativity=16),
+        ]
+        result = scope.estimate_hit_rates(
+            layers,
+            {
+                "read_fraction": 0.82,
+                "hit_rate_model": {
+                    "mode": "operator",
+                    "reuse_window_bytes": {
+                        "L1": 65536, "L2": 2097152, "L3": 8388608,
+                    },
+                    "locality_factor": 2.0,
+                    "reference_associativity": {
+                        "L1": 8, "L2": 8, "L3": 16,
+                    },
+                },
+            },
+            ROOT,
+        )
+        for rate in result.hit_rates:
+            self.assertGreaterEqual(rate, 0.60)
+            self.assertLessEqual(rate, 0.80)
+        larger = replace(layers[1], capacity_bytes=4 * 1048576)
+        larger_result = scope.estimate_hit_rates(
+            [layers[0], larger, layers[2]],
+            {
+                "read_fraction": 0.82,
+                "hit_rate_model": {
+                    "mode": "operator",
+                    "reuse_window_bytes": [65536, 2097152, 8388608],
+                    "locality_factor": 2.0,
+                    "reference_associativity": [8, 8, 16],
+                },
+            },
+            ROOT,
+        )
+        self.assertGreater(larger_result.hit_rates[1], result.hit_rates[1])
+
+    def test_guidance_and_density_scaled_requested_mapping(self) -> None:
+        report = {
+            "average_latency_ns": 10.0,
+            "average_power_mw": 20.0,
+            "expected_dynamic_energy_nj_per_request": 2.0,
+        }
+        balanced = scope.guidance_score(
+            report, {"weights": {"latency": 1, "power": 1}}
+        )
+        latency_heavy = scope.guidance_score(
+            report, {"weights": {"latency": 2, "power": 1}}
+        )
+        self.assertAlmostEqual(balanced["score"], 1 / 200)
+        self.assertAlmostEqual(latency_heavy["score"], 1 / 2000)
+        self.assertEqual(
+            scope._guided_destiny_target(
+                {"weights": {"latency": 2, "power": 1}}, 0.82
+            ),
+            "ReadLatency",
+        )
+        raw = scope.select_workload(
+            scope.load_json(ROOT / "config/scope_v2_requested.json"), None
+        )
+        variants = scope.design_variants(raw, False, ROOT, self.library)
+        self.assertEqual(len(variants), 1)
+        self.assertEqual(
+            [item["capacity_bytes"] for item in variants[0]["layers"]],
+            [32768, 4 * 1048576, 16 * 4194304],
+        )
 
     def test_supplied_average_equation(self) -> None:
         links = [

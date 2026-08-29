@@ -27,6 +27,18 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tupl
 
 FLOAT_RE = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
 VALID_POLICIES = {"LRU", "FIFO", "RANDOM"}
+GUIDANCE_METRICS = {
+    "latency": "average_latency_ns",
+    "latency_ns": "average_latency_ns",
+    "average_latency_ns": "average_latency_ns",
+    "power": "average_power_mw",
+    "power_mw": "average_power_mw",
+    "average_power_mw": "average_power_mw",
+    "energy": "expected_dynamic_energy_nj_per_request",
+    "energy_nj": "expected_dynamic_energy_nj_per_request",
+    "expected_dynamic_energy_nj_per_request":
+        "expected_dynamic_energy_nj_per_request",
+}
 
 
 class ScopeError(RuntimeError):
@@ -58,6 +70,13 @@ class DestinyMetrics:
     tag_array_leakage_power_mw: float
     refresh_latency_us: float = 0.0
     refresh_energy_nj_per_bank: float = 0.0
+    optimization_target: str = ""
+    bank_organization: str = ""
+    mat_organization: str = ""
+    subarray_size: str = ""
+    local_wire: str = ""
+    global_wire: str = ""
+    buffer_design: str = ""
 
 
 @dataclass(frozen=True)
@@ -268,6 +287,10 @@ class DestinyRunner:
         require(assoc_match is not None, "missing DESTINY associativity")
         scale = {"B": 1, "KB": 1024, "MB": 1024 * 1024}[capacity_match.group(2)]
         capacity_bytes = int(float(capacity_match.group(1)) * scale)
+        def detail(pattern: str) -> str:
+            match = re.search(pattern, text, flags=re.MULTILINE)
+            return match.group(1).strip() if match else ""
+
         return DestinyMetrics(
             capacity_bytes=capacity_bytes,
             associativity=int(assoc_match.group(1)),
@@ -291,6 +314,13 @@ class DestinyRunner:
             refresh_energy_nj_per_bank=DestinyRunner._number(
                 text, "Cache Refresh Dynamic Energy", optional=True
             ),
+            optimization_target=detail(r"^\s*Optimized for:\s*(.+)$"),
+            bank_organization=detail(r"^\s*Bank Organization:\s*(.+)$"),
+            mat_organization=detail(r"^\s*Mat Organization:\s*(.+)$"),
+            subarray_size=detail(r"^\s*-\s*Subarray Size\s*:\s*(.+)$"),
+            local_wire=detail(r"^\s*Local Wire[^:]*:\s*(.+)$"),
+            global_wire=detail(r"^\s*Global Wire[^:]*:\s*(.+)$"),
+            buffer_design=detail(r"^\s*Buffer Design[^:]*:\s*(.+)$"),
         )
 
 
@@ -350,6 +380,12 @@ def _power_from_device_library(
         leakage_mw = refresh_mw
     else:
         raise ScopeError(f"unsupported leakage model: {leakage_model}")
+    # In the supplied eDRAM table, leakage is defined as Pref (or the same
+    # capacitor-retention mechanism used to derive Pref).  Count it once under
+    # refresh instead of duplicating it as independent static power.  SRAM is
+    # the only library device with a separate static cell-leakage term.
+    if str(entry.get("family")) != "SRAM":
+        leakage_mw = 0.0
     return leakage_mw, refresh_mw
 
 
@@ -393,11 +429,22 @@ def _apply_device_library(
         hit_energy_nj=energy_floor("read_energy", raw_metrics.hit_energy_nj),
         miss_energy_nj=raw_metrics.miss_energy_nj,
         write_energy_nj=energy_floor("write_energy", raw_metrics.write_energy_nj),
-        leakage_power_mw=raw_metrics.tag_array_leakage_power_mw + device_leakage_mw,
+        # The Device Library is authoritative for cell/static power.  The raw
+        # DESTINY tag/data leakage remains in raw_metrics for auditing, but is
+        # not added again because that made the v1 static result dominate by
+        # hundreds of mW and double-counted an obsolete SRAM-based tag model.
+        leakage_power_mw=device_leakage_mw,
         data_array_leakage_power_mw=device_leakage_mw,
-        tag_array_leakage_power_mw=raw_metrics.tag_array_leakage_power_mw,
+        tag_array_leakage_power_mw=0.0,
         refresh_latency_us=raw_metrics.refresh_latency_us,
         refresh_energy_nj_per_bank=raw_metrics.refresh_energy_nj_per_bank,
+        optimization_target=raw_metrics.optimization_target,
+        bank_organization=raw_metrics.bank_organization,
+        mat_organization=raw_metrics.mat_organization,
+        subarray_size=raw_metrics.subarray_size,
+        local_wire=raw_metrics.local_wire,
+        global_wire=raw_metrics.global_wire,
+        buffer_design=raw_metrics.buffer_design,
     )
     return effective, device_leakage_mw, device_refresh_mw
 
@@ -579,8 +626,63 @@ def estimate_hit_rates(layers: Sequence[LayerSpec], workload: Dict[str, Any],
             observed_read_fraction=read_fraction,
         )
 
+    if mode == "operator":
+        windows = model.get("reuse_window_bytes")
+        locality = model.get("locality_factor", 2.0)
+        reference_associativity = model.get("reference_associativity", 8)
+        require(isinstance(windows, (dict, list)),
+                "operator reuse_window_bytes must be an object or list")
+
+        def per_layer(value: Any, index: int, name: str) -> float:
+            if isinstance(value, dict):
+                require(name in value, f"operator model missing {name}")
+                return float(value[name])
+            if isinstance(value, list):
+                require(len(value) == len(layers),
+                        "operator list must contain one value per layer")
+                return float(value[index])
+            return float(value)
+
+        policy_factors = {"LRU": 1.0, "FIFO": 0.96, "RANDOM": 0.90}
+        maximum = float(model.get("max_hit_rate", 0.95))
+        minimum = float(model.get("min_hit_rate", 0.0))
+        require(0.0 <= minimum <= maximum <= 1.0,
+                "operator hit-rate bounds must satisfy 0 <= min <= max <= 1")
+        rates: List[float] = []
+        for index, layer in enumerate(layers):
+            window = per_layer(windows, index, layer.name)
+            factor = per_layer(locality, index, layer.name)
+            reference = per_layer(
+                reference_associativity, index, layer.name
+            )
+            require(window > 0.0 and factor >= 0.0 and reference > 0.0,
+                    f"{layer.name}: invalid operator locality parameters")
+            associativity_factor = clamp(
+                1.0 + 0.08 * math.log2(layer.associativity / reference),
+                0.75,
+                1.25,
+            )
+            exponent = (
+                factor
+                * layer.capacity_bytes / window
+                * associativity_factor
+                * policy_factors[layer.replacement_policy]
+            )
+            rates.append(clamp(1.0 - math.exp(-exponent), minimum, maximum))
+        writebacks = tuple(layer.estimated_writebacks_per_request for layer in layers)
+        return HitRateResult(
+            hit_rates=tuple(rates),
+            accesses=tuple(0 for _ in layers),
+            hits=tuple(0 for _ in layers),
+            writebacks_per_request=writebacks,
+            offchip_writebacks_per_request=float(
+                model.get("offchip_writebacks_per_request", 0.0)
+            ),
+            observed_read_fraction=read_fraction,
+        )
+
     require(mode in {"synthetic", "trace"},
-            "hit_rate_model.mode must be fixed, synthetic, or trace")
+            "hit_rate_model.mode must be fixed, operator, synthetic, or trace")
     line_sizes = {layer.line_bytes for layer in layers}
     require(len(line_sizes) == 1,
             "WB+WA hit-rate simulation requires one cache-line size across all levels")
@@ -1017,15 +1119,253 @@ def load_json(path: Path) -> Dict[str, Any]:
     return data
 
 
-def design_variants(raw: Dict[str, Any], explore: bool) -> List[Dict[str, Any]]:
+def select_workload(raw: Dict[str, Any], requested: Optional[str]) -> Dict[str, Any]:
+    """Resolve a named application workload and its default Guidance."""
+    resolved = copy.deepcopy(raw)
+    profiles = resolved.get("workloads")
+    if profiles is None:
+        require("workload" in resolved, "config must contain workload or workloads")
+        resolved.setdefault("guidance", {
+            "name": "latency_power_product",
+            "weights": {"latency": 1.0, "power": 1.0},
+        })
+        return resolved
+    require(isinstance(profiles, dict) and profiles,
+            "workloads must be a non-empty object")
+    selected = requested or str(resolved.get("selected_workload", "attention"))
+    require(selected in profiles,
+            f"workload must be one of {sorted(profiles)}")
+    profile = copy.deepcopy(profiles[selected])
+    require(isinstance(profile, dict), f"workload {selected} must be an object")
+    profile_guidance = profile.pop("guidance", None)
+    resolved["workload"] = profile
+    resolved["selected_workload"] = selected
+    if "guidance" not in resolved:
+        require(isinstance(profile_guidance, dict),
+                f"workload {selected} must provide guidance")
+        resolved["guidance"] = profile_guidance
+    return resolved
+
+
+def _canonical_guidance(guidance: Dict[str, Any]) -> Dict[str, Any]:
+    weights_raw = guidance.get("weights", {"latency": 1.0, "power": 1.0})
+    normalizers_raw = guidance.get("normalizers", {})
+    limits_raw = guidance.get("limits", {})
+    require(isinstance(weights_raw, dict) and weights_raw,
+            "guidance.weights must be a non-empty object")
+    weights: Dict[str, float] = {}
+    normalizers: Dict[str, float] = {}
+    limits: Dict[str, float] = {}
+    for alias, value in weights_raw.items():
+        require(alias in GUIDANCE_METRICS, f"unsupported Guidance metric: {alias}")
+        metric = GUIDANCE_METRICS[alias]
+        weight = float(value)
+        require(weight >= 0.0, f"Guidance weight for {alias} must be non-negative")
+        weights[metric] = weights.get(metric, 0.0) + weight
+    require(any(value > 0.0 for value in weights.values()),
+            "at least one Guidance weight must be positive")
+    require(isinstance(normalizers_raw, dict), "guidance.normalizers must be an object")
+    for alias, value in normalizers_raw.items():
+        require(alias in GUIDANCE_METRICS,
+                f"unsupported Guidance normalizer: {alias}")
+        normalizer = float(value)
+        require(normalizer > 0.0,
+                f"Guidance normalizer for {alias} must be positive")
+        normalizers[GUIDANCE_METRICS[alias]] = normalizer
+    require(isinstance(limits_raw, dict), "guidance.limits must be an object")
+    for alias, value in limits_raw.items():
+        require(alias in GUIDANCE_METRICS, f"unsupported Guidance limit: {alias}")
+        limit = float(value)
+        require(limit >= 0.0, f"Guidance limit for {alias} must be non-negative")
+        limits[GUIDANCE_METRICS[alias]] = limit
+    return {
+        "name": str(guidance.get("name", "custom")),
+        "weights": weights,
+        "normalizers": normalizers,
+        "limits": limits,
+        "destiny_optimization_target": guidance.get("destiny_optimization_target"),
+    }
+
+
+def guidance_score(report: Dict[str, Any], guidance: Dict[str, Any]) -> Dict[str, Any]:
+    """Evaluate a normalized multiplicative FoM; higher score is better."""
+    canonical = _canonical_guidance(guidance)
+    cost = 1.0
+    terms: Dict[str, Dict[str, float]] = {}
+    for metric, weight in canonical["weights"].items():
+        if weight == 0.0:
+            continue
+        value = float(report[metric])
+        normalizer = float(canonical["normalizers"].get(metric, 1.0))
+        require(value > 0.0, f"Guidance metric {metric} must be positive")
+        normalized = value / normalizer
+        cost *= normalized ** weight
+        terms[metric] = {
+            "value": value,
+            "normalizer": normalizer,
+            "normalized": normalized,
+            "weight": weight,
+        }
+    score = 1.0 / cost
+    limit_checks = [
+        {
+            "metric": metric,
+            "value": float(report[metric]),
+            "limit": limit,
+            "pass": float(report[metric]) <= limit,
+        }
+        for metric, limit in canonical["limits"].items()
+    ]
+    canonical["terms"] = terms
+    canonical["cost"] = cost
+    canonical["score"] = score
+    canonical["limit_checks"] = limit_checks
+    return canonical
+
+
+def _guided_destiny_target(guidance: Dict[str, Any], read_fraction: float) -> str:
+    canonical = _canonical_guidance(guidance)
+    explicit = canonical.get("destiny_optimization_target")
+    valid = {
+        "ReadLatency", "WriteLatency", "ReadDynamicEnergy",
+        "WriteDynamicEnergy", "ReadEDP", "WriteEDP", "LeakagePower", "Area",
+    }
+    if explicit is not None:
+        require(str(explicit) in valid,
+                f"unsupported DESTINY optimization target: {explicit}")
+        return str(explicit)
+    prefix = "Read" if read_fraction >= 0.5 else "Write"
+    latency_weight = canonical["weights"].get("average_latency_ns", 0.0)
+    power_weight = (
+        canonical["weights"].get("average_power_mw", 0.0)
+        + canonical["weights"].get(
+            "expected_dynamic_energy_nj_per_request", 0.0
+        )
+    )
+    if latency_weight > 1.5 * power_weight:
+        return prefix + "Latency"
+    if power_weight > 1.5 * latency_weight:
+        return prefix + "DynamicEnergy"
+    return prefix + "EDP"
+
+
+def _set_config_field(text: str, field: str, value: Any) -> str:
+    pattern = rf"^{re.escape(field)}:\s*.*$"
+    require(re.search(pattern, text, flags=re.MULTILINE) is not None,
+            f"DESTINY base config missing {field}")
+    return re.sub(pattern, f"{field}: {value}", text, flags=re.MULTILINE)
+
+
+def _generate_destiny_config(
+    repo_root: Path,
+    layer: Dict[str, Any],
+    entry: Dict[str, Any],
+    target: str,
+) -> Path:
+    base_path = _resolve_path(repo_root, str(entry["destiny_cfg"]))
+    require(base_path.is_file(), f"DESTINY device config not found: {base_path}")
+    text = base_path.read_text(encoding="utf-8")
+    cell_match = re.search(r"^-MemoryCellInputFile:\s*(\S+)\s*$", text, re.MULTILINE)
+    require(cell_match is not None,
+            f"{base_path.name}: missing -MemoryCellInputFile")
+    text = _set_config_field(
+        text, "-MemoryCellInputFile", f"../devices/{cell_match.group(1)}"
+    )
+    text = _set_config_field(
+        text, "-Capacity (KB)", int(layer["capacity_bytes"]) // 1024
+    )
+    text = _set_config_field(
+        text, "-Associativity (for cache only)", int(layer["associativity"])
+    )
+    text = _set_config_field(
+        text, "-WordWidth (bit)", int(layer["line_bytes"]) * 8
+    )
+    text = _set_config_field(text, "-OptimizationTarget", target)
+    text = _set_config_field(text, "-PrintLevel", 1)
+    text = _set_config_field(
+        text, "-StackedDieCount", int(layer.get("stacked_tiers", 1))
+    )
+    generated_dir = repo_root / "config" / ".scope-cache"
+    generated_dir.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^a-z0-9]+", "_", str(layer["device"]).lower()).strip("_")
+    filename = (
+        f"{str(layer['name']).lower()}_{slug}_{int(layer['capacity_bytes']) // 1024}k_"
+        f"{int(layer['associativity'])}w_{target.lower()}.cfg"
+    )
+    output = generated_dir / filename
+    if not output.exists() or output.read_text(encoding="utf-8") != text:
+        output.write_text(text, encoding="utf-8")
+    return output
+
+
+def _effective_density(entry: Dict[str, Any], stacked_tiers: int) -> float:
+    density = float(entry["density_f2"])
+    if "density_divisor" in entry:
+        density /= stacked_tiers
+    require(density > 0.0, "effective device density must be positive")
+    return density
+
+
+def _capacity_for_device(
+    raw: Dict[str, Any], layer: Dict[str, Any], entry: Dict[str, Any],
+    stacked_tiers: int,
+) -> Tuple[int, int, float, int]:
+    capacity_cfg = raw.get("capacity", {})
+    require(isinstance(capacity_cfg, dict), "capacity must be an object")
+    mode = str(layer.get("capacity_mode", capacity_cfg.get("mode", "fixed")))
+    if mode == "fixed":
+        capacity = int(layer["capacity_bytes"])
+        baseline = capacity
+        scale = 1.0
+        ideal_capacity = capacity
+    else:
+        require(mode == "density_scaled",
+                "capacity mode must be fixed or density_scaled")
+        baselines = capacity_cfg.get("sram_baseline_bytes", {})
+        require(isinstance(baselines, dict) and layer["name"] in baselines,
+                f"missing SRAM baseline capacity for {layer['name']}")
+        baseline = int(baselines[layer["name"]])
+        reference_density = float(capacity_cfg.get("sram_density_f2", 140.0))
+        scale = reference_density / _effective_density(entry, stacked_tiers)
+        capacity = int(round(baseline * scale))
+        ideal_capacity = capacity
+        if bool(capacity_cfg.get("destiny_power_of_two", True)):
+            capacity = 1 << int(round(math.log2(capacity)))
+    quantum = math.lcm(1024, int(layer["line_bytes"]) * int(layer["associativity"]))
+    capacity = max(quantum, int(round(capacity / quantum)) * quantum)
+    return capacity, baseline, scale, ideal_capacity
+
+
+def design_variants(
+    raw: Dict[str, Any], explore: bool, repo_root: Path,
+    device_library: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
     layers = raw.get("layers")
     require(isinstance(layers, list) and len(layers) == 3,
             "config must contain exactly three layers")
+    automatic = raw.get("auto_selection", {})
+    require(isinstance(automatic, dict), "auto_selection must be an object")
+    auto_enabled = bool(automatic.get("enabled", False))
+    all_devices = automatic.get("devices", list(device_library))
+    require(isinstance(all_devices, list) and all_devices,
+            "auto_selection.devices must be a non-empty list")
+    target = _guided_destiny_target(
+        raw.get("guidance", {}), float(raw["workload"]["read_fraction"])
+    )
     choices: List[List[Dict[str, Any]]] = []
     for layer in layers:
         require(isinstance(layer, dict), "each layer must be an object")
-        base = {key: value for key, value in layer.items() if key != "candidates"}
-        candidates = layer.get("candidates", [{}]) if explore else [{}]
+        base = {
+            key: value for key, value in layer.items()
+            if key not in {"candidates", "devices"}
+        }
+        if auto_enabled:
+            devices = layer.get("devices", all_devices)
+            require(isinstance(devices, list) and devices,
+                    f"{base.get('name', 'layer')}: devices must be non-empty")
+            candidates = [{"device": device} for device in devices]
+        else:
+            candidates = layer.get("candidates", [{}]) if explore else [{}]
         require(isinstance(candidates, list) and candidates,
                 f"{base.get('name', 'layer')}: candidates must be a non-empty list")
         expanded: List[Dict[str, Any]] = []
@@ -1033,6 +1373,42 @@ def design_variants(raw: Dict[str, Any], explore: bool) -> List[Dict[str, Any]]:
             require(isinstance(candidate, dict), "each candidate must be an object")
             merged = copy.deepcopy(base)
             merged.update(copy.deepcopy(candidate))
+            if auto_enabled:
+                device = str(merged["device"])
+                require(device in device_library,
+                        f"unknown automatic device: {device}")
+                entry = device_library[device]
+                stacked_tiers = int(merged.get(
+                    "stacked_tiers", 4 if "density_divisor" in entry else 1
+                ))
+                capacity, baseline, scale, ideal_capacity = _capacity_for_device(
+                    raw, merged, entry, stacked_tiers
+                )
+                merged["stacked_tiers"] = stacked_tiers
+                merged["capacity_bytes"] = capacity
+                merged["sram_baseline_capacity_bytes"] = baseline
+                merged["density_capacity_scale"] = scale
+                merged["ideal_density_capacity_bytes"] = ideal_capacity
+                merged["actual_capacity_scale"] = capacity / baseline
+                if str(entry["family"]) == "eDRAM":
+                    merged.setdefault(
+                        "refresh_interval_us",
+                        float(automatic.get("refresh_interval_us", 10.0)),
+                    )
+                    merged.setdefault(
+                        "retention_time_us",
+                        float(automatic.get("retention_time_us", 10.0)),
+                    )
+                if entry["endurance"].get("writes_per_line") is None:
+                    merged.setdefault(
+                        "bti_endurance_writes_per_line",
+                        float(automatic["bti_endurance_writes_per_line"]),
+                    )
+                generated = _generate_destiny_config(
+                    repo_root, merged, entry, target
+                )
+                merged["destiny_config"] = str(generated.relative_to(repo_root))
+                merged["destiny_optimization_target"] = target
             expanded.append(merged)
         choices.append(expanded)
 
@@ -1082,6 +1458,19 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
     )
     report = model.average()
     report["name"] = str(raw.get("name", "SCOPE"))
+    report["selected_workload"] = str(raw.get("selected_workload", "custom"))
+    guidance = guidance_score(report, raw.get("guidance", {}))
+    report["guidance"] = guidance
+    report["guidance_score"] = guidance["score"]
+    for check in guidance["limit_checks"]:
+        report["constraints"].append({
+            "layer": "SYSTEM",
+            "constraint": f"Guidance limit: {check['metric']}",
+            "value": check["value"],
+            "limit": check["limit"],
+            "pass": check["pass"],
+        })
+    report["feasible"] = all(item["pass"] for item in report["constraints"])
     report["layers"] = [
         {
             "name": layer.name,
@@ -1092,6 +1481,18 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
             "associativity": layer.associativity,
             "line_bytes": layer.line_bytes,
             "replacement_policy": layer.replacement_policy,
+            "banks": layer.banks,
+            "sram_baseline_capacity_bytes": layer_raw.get(
+                "sram_baseline_capacity_bytes", layer.capacity_bytes
+            ),
+            "density_capacity_scale": layer_raw.get("density_capacity_scale", 1.0),
+            "ideal_density_capacity_bytes": layer_raw.get(
+                "ideal_density_capacity_bytes", layer.capacity_bytes
+            ),
+            "actual_capacity_scale": layer_raw.get("actual_capacity_scale", 1.0),
+            "destiny_optimization_target": layer_raw.get(
+                "destiny_optimization_target", layer.raw_metrics.optimization_target
+            ),
             "device_rows_per_bank": layer.device_rows_per_bank,
             "device_library_values": layer.device_library_entry,
             "device_derived": {
@@ -1107,12 +1508,12 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
             "combination_rule": (
                 "dynamic latency/energy = max(DESTINY hierarchy result, Device Library "
                 "data-bit floor); eDRAM read functions use the matching DESTINY result "
-                "at Nrow; data-array leakage is replaced by Device Library and DESTINY "
-                "tag-array leakage is retained; refresh/endurance/density/variation/M3D "
-                "come from Device Library"
+                "at Nrow; effective static and refresh power come only from the Device "
+                "Library while raw DESTINY data/tag leakage is audit-only; endurance/"
+                "density/variation/M3D come from Device Library"
             ),
         }
-        for layer in layer_specs
+        for layer, layer_raw in zip(layer_specs, raw["layers"])
     ]
     report["crossbars"] = [
         {
@@ -1129,6 +1530,7 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
     ]
     report["hit_rate_model"] = {
         "mode": workload.get("hit_rate_model", {}).get("mode", "synthetic"),
+        "parameters": workload.get("hit_rate_model", {}),
         "observed_read_fraction": hit_rates.observed_read_fraction,
         "writebacks_per_request": list(hit_rates.writebacks_per_request),
         "offchip_writebacks_per_request": hit_rates.offchip_writebacks_per_request,
@@ -1139,7 +1541,10 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
 
 
 def print_report(report: Dict[str, Any], instructions: Sequence[Dict[str, Any]]) -> None:
-    print(f"SCOPE evaluation: {report['name']}")
+    print(
+        f"SCOPE evaluation: {report['name']} "
+        f"[workload={report.get('selected_workload', 'custom')}]"
+    )
     print("=" * 72)
     print("Layers (one DESTINY instance each):")
     for index, layer in enumerate(report["layers"]):
@@ -1148,6 +1553,12 @@ def print_report(report: Dict[str, Any], instructions: Sequence[Dict[str, Any]])
             f"  {layer['name']}: {layer['device']}, {layer['capacity_bytes'] // 1024} KiB, "
             f"{layer['associativity']}-way, R={report['hit_rates'][index]:.6f}, "
             f"read/write={metrics['hit_latency_ns']:.3f}/{metrics['write_latency_ns']:.3f} ns"
+        )
+        print(
+            f"      DESTINY {layer['destiny_optimization_target']}; "
+            f"bank={metrics['bank_organization'] or 'n/a'}, "
+            f"mat={metrics['mat_organization'] or 'n/a'}, "
+            f"subarray={metrics['subarray_size'] or 'n/a'}"
         )
     print("\nAverage latency breakdown (provided FoM equation):")
     for item in report["latency_breakdown"]:
@@ -1168,7 +1579,11 @@ def print_report(report: Dict[str, Any], instructions: Sequence[Dict[str, Any]])
     print(f"  {'STATIC TOTAL':<31} {report['static_power_mw']:.9g} mW")
     print(f"  {'REFRESH TOTAL':<31} {report['refresh_power_mw']:.9g} mW")
     print(f"  {'POWER TOTAL':<31} {report['average_power_mw']:.9g} mW")
-    print(f"\nFoM = {report['fom_per_ns_mw']:.12g} 1/(ns*mW)")
+    print(f"\nClassic latency*power FoM = {report['fom_per_ns_mw']:.12g} 1/(ns*mW)")
+    print(
+        f"Guidance '{report['guidance']['name']}' score = "
+        f"{report['guidance_score']:.12g}"
+    )
     print(f"Feasible = {str(report['feasible']).lower()}")
     print("Constraints:")
     for item in report["constraints"]:
@@ -1210,6 +1625,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="where the explicit instruction obtains its cache line")
     parser.add_argument("--explore", action="store_true",
                         help="evaluate the Cartesian product of per-layer candidates")
+    parser.add_argument("--workload",
+                        help="select a named workload profile from config.workloads")
     parser.add_argument("--json-output", type=Path,
                         help="also write the complete machine-readable report")
     parser.add_argument("--timeout", type=float, default=300.0,
@@ -1227,7 +1644,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     repo_root = Path(__file__).resolve().parent
     config_path = args.config if args.config.is_absolute() else Path.cwd() / args.config
     try:
-        raw = load_json(config_path.resolve())
+        raw = select_workload(load_json(config_path.resolve()), args.workload)
         library_path = _resolve_path(
             repo_root, str(raw.get("device_library", "config/device_library.json"))
         )
@@ -1237,7 +1654,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "device library must contain a non-empty devices object")
         binary = _resolve_path(repo_root, str(raw.get("destiny_binary", "destiny")))
         runner = DestinyRunner(repo_root, binary, timeout_s=args.timeout)
-        variants = design_variants(raw, explore=args.explore)
+        variants = design_variants(
+            raw, explore=args.explore, repo_root=repo_root,
+            device_library=device_library,
+        )
         evaluations: List[Tuple[ScopeModel, Dict[str, Any]]] = []
         for variant in variants:
             evaluations.append(
@@ -1251,7 +1671,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         feasible = [item for item in evaluations if item[1]["feasible"]]
         pool = feasible if feasible else evaluations
-        model, report = max(pool, key=lambda item: item[1]["fom_per_ns_mw"])
+        model, report = max(pool, key=lambda item: item[1]["guidance_score"])
         report["exploration"] = {
             "evaluated_designs": len(evaluations),
             "feasible_designs": len(feasible),
@@ -1262,6 +1682,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "average_latency_ns": item[1]["average_latency_ns"],
                     "average_power_mw": item[1]["average_power_mw"],
                     "fom_per_ns_mw": item[1]["fom_per_ns_mw"],
+                    "guidance_score": item[1]["guidance_score"],
+                    "capacities_bytes": [
+                        layer["capacity_bytes"] for layer in item[1]["layers"]
+                    ],
+                    "destiny_optimization_targets": [
+                        layer["destiny_optimization_target"]
+                        for layer in item[1]["layers"]
+                    ],
                     "feasible": item[1]["feasible"],
                 }
                 for item in evaluations
@@ -1273,6 +1701,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "source": library_raw.get("source"),
             "semantics": library_raw.get("semantics"),
         }
+        report["auto_selection"] = raw.get("auto_selection", {"enabled": False})
         if args.op:
             cases = [{"op": args.op, "hit_level": args.hit_level}]
         else:

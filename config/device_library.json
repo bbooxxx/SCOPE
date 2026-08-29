@@ -1,16 +1,18 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "source": "User-provided Device Library screenshots (2026-08-28)",
   "semantics": {
     "dynamic_energy_unit": "fJ/bit/access",
     "leakage_unit": "per data bit unless a model is named",
     "refresh_unit": "per data bit",
     "greater_than_values": "stored as a conservative numeric lower bound",
-    "edram_read_functions": "evaluated by the matching DESTINY eDRAM instance at its configured Nrow"
+    "edram_read_functions": "evaluated by the matching DESTINY eDRAM instance at its configured Nrow",
+    "effective_static_power": "SRAM uses the table leakage; MRAM/eDRAM are zero-static in this behavior-level model; eDRAM retention cost is counted only as refresh power"
   },
   "devices": {
     "STT-MRAM": {
       "family": "MRAM",
+      "destiny_cfg": "config/devices/stt_mram.cfg",
       "read_latency": {"model": "constant", "value_ns": 10.0, "approximate": false},
       "read_energy": {"model": "constant", "value_fj_per_bit": 41.0},
       "write_latency": {"model": "constant", "value_ns": 20.0, "approximate": true},
@@ -25,6 +27,7 @@
     },
     "SOT-MRAM": {
       "family": "MRAM",
+      "destiny_cfg": "config/devices/sot_mram.cfg",
       "read_latency": {"model": "constant", "value_ns": 1.0, "approximate": true},
       "read_energy": {"model": "constant", "value_fj_per_bit": 18.3},
       "write_latency": {"model": "constant", "value_ns": 10.0, "approximate": true},
@@ -39,6 +42,7 @@
     },
     "SRAM": {
       "family": "SRAM",
+      "destiny_cfg": "config/devices/sram.cfg",
       "read_latency": {"model": "constant", "value_ns": 1.0, "approximate": true},
       "read_energy": {"model": "constant", "value_fj_per_bit": 21.5},
       "write_latency": {"model": "constant", "value_ns": 1.0, "approximate": true},
@@ -53,6 +57,7 @@
     },
     "Si-eDRAM": {
       "family": "eDRAM",
+      "destiny_cfg": "config/devices/si_edram.cfg",
       "read_latency": {"model": "destiny_Lr_s_Nrow"},
       "read_energy": {"model": "destiny_Er_Nrow"},
       "write_latency": {"model": "constant", "value_ns": 2.0, "approximate": false},
@@ -72,6 +77,7 @@
     },
     "TFET-eDRAM": {
       "family": "eDRAM",
+      "destiny_cfg": "config/devices/tfet_edram.cfg",
       "read_latency": {"model": "destiny_Lr_s_Nrow"},
       "read_energy": {"model": "destiny_Er_Nrow"},
       "write_latency": {"model": "constant", "value_ns": 3.0, "approximate": false},
@@ -86,6 +92,7 @@
     },
     "2D-eDRAM": {
       "family": "eDRAM",
+      "destiny_cfg": "config/devices/2d_edram.cfg",
       "read_latency": {
         "model": "destiny_Lr_s_Nrow",
         "hybrid": "Lr,s(Nrow)",
@@ -105,6 +112,7 @@
     },
     "OSFET-eDRAM": {
       "family": "eDRAM",
+      "destiny_cfg": "config/devices/osfet_edram.cfg",
       "read_latency": {
         "model": "destiny_Lr_s_Nrow",
         "hybrid": "Lr,s(Nrow)",

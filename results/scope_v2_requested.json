@@ -1,0 +1,935 @@
+{
+  "hit_rates": [
+    0.6321205588285577,
+    0.95,
+    0.95
+  ],
+  "conditional_accesses": [
+    0,
+    0,
+    0
+  ],
+  "conditional_hits": [
+    0,
+    0,
+    0
+  ],
+  "average_latency_ns": 2.3350282380606644,
+  "latency_breakdown": [
+    {
+      "component": "L1 access",
+      "reach_probability": 1.0,
+      "raw_latency_ns": 1.0,
+      "weighted_latency_ns": 1.0
+    },
+    {
+      "component": "L1-L2 ideal crossbar + L2 access",
+      "reach_probability": 0.36787944117144233,
+      "raw_latency_ns": 3.2493,
+      "weighted_latency_ns": 1.1953506681983674
+    },
+    {
+      "component": "L2-L3 ideal crossbar + L3 access",
+      "reach_probability": 0.018393972058572135,
+      "raw_latency_ns": 5.30306,
+      "weighted_latency_ns": 0.09754433746493155
+    },
+    {
+      "component": "off-chip memory",
+      "reach_probability": 0.0009196986029286076,
+      "raw_latency_ns": 45.812,
+      "weighted_latency_ns": 0.04213323239736537
+    }
+  ],
+  "expected_dynamic_energy_nj_per_request": 0.14298056381927765,
+  "dynamic_power_mw": 142.98056381927765,
+  "dynamic_power_breakdown": [
+    {
+      "component": "L1 access",
+      "reach_probability": 1.0,
+      "raw_energy_nj": 0.01764,
+      "weighted_energy_nj": 0.01764,
+      "power_mw": 17.64
+    },
+    {
+      "component": "L1-L2 ideal crossbar + L2 access",
+      "reach_probability": 0.36787944117144233,
+      "raw_energy_nj": 0.20885599999999999,
+      "weighted_energy_nj": 0.07683382856530276,
+      "power_mw": 76.83382856530275
+    },
+    {
+      "component": "L2-L3 ideal crossbar + L3 access",
+      "reach_probability": 0.018393972058572135,
+      "raw_energy_nj": 0.500476,
+      "weighted_energy_nj": 0.009205741559985948,
+      "power_mw": 9.205741559985949
+    },
+    {
+      "component": "off-chip memory",
+      "reach_probability": 0.0009196986029286076,
+      "raw_energy_nj": 10.24,
+      "weighted_energy_nj": 0.009417713693988942,
+      "power_mw": 9.417713693988942
+    },
+    {
+      "component": "WB to L2",
+      "reach_probability": 0.02,
+      "raw_energy_nj": 0.21377600000000002,
+      "weighted_energy_nj": 0.0042755200000000005,
+      "off_critical_path": true,
+      "power_mw": 4.275520000000001
+    },
+    {
+      "component": "WB to L3",
+      "reach_probability": 0.01,
+      "raw_energy_nj": 0.512776,
+      "weighted_energy_nj": 0.00512776,
+      "off_critical_path": true,
+      "power_mw": 5.127759999999999
+    },
+    {
+      "component": "WB to off-chip memory",
+      "reach_probability": 0.002,
+      "raw_energy_nj": 10.24,
+      "weighted_energy_nj": 0.02048,
+      "off_critical_path": true,
+      "power_mw": 20.48
+    }
+  ],
+  "static_power_mw": 0.00720896,
+  "static_power_breakdown": [
+    {
+      "component": "L1",
+      "power_mw": 0.00720896
+    },
+    {
+      "component": "L2",
+      "power_mw": 0.0
+    },
+    {
+      "component": "L3",
+      "power_mw": 0.0
+    }
+  ],
+  "refresh_power_mw": 5.70425344e-05,
+  "refresh_power_breakdown": [
+    {
+      "component": "L1",
+      "power_mw": 0.0
+    },
+    {
+      "component": "L2",
+      "power_mw": 3.3554432e-06
+    },
+    {
+      "component": "L3",
+      "power_mw": 5.36870912e-05
+    }
+  ],
+  "average_power_mw": 142.98782982181206,
+  "fom_per_ns_mw": 0.0029950824908699567,
+  "feasible": true,
+  "constraints": [
+    {
+      "layer": "L1",
+      "constraint": "BER",
+      "value": 1e-12,
+      "limit": 1e-08,
+      "pass": true
+    },
+    {
+      "layer": "L1",
+      "constraint": "high_variation",
+      "value": 0,
+      "limit": 0,
+      "pass": true,
+      "detail": "low"
+    },
+    {
+      "layer": "L1",
+      "constraint": "endurance",
+      "value": 55434375000000.016,
+      "limit": 1000000000000000.0,
+      "pass": true,
+      "writes_per_request": 0.18000000000000005
+    },
+    {
+      "layer": "L1",
+      "constraint": "refresh<=retention",
+      "value": null,
+      "limit": null,
+      "pass": true,
+      "not_applicable": true
+    },
+    {
+      "layer": "L2",
+      "constraint": "BER",
+      "value": 1e-10,
+      "limit": 1e-08,
+      "pass": true
+    },
+    {
+      "layer": "L2",
+      "constraint": "high_variation",
+      "value": 0,
+      "limit": 0,
+      "pass": true,
+      "detail": "low"
+    },
+    {
+      "layer": "L2",
+      "constraint": "endurance",
+      "value": 48120117187.5,
+      "limit": 1000000000000000.0,
+      "pass": true,
+      "writes_per_request": 0.02
+    },
+    {
+      "layer": "L2",
+      "constraint": "refresh<=retention",
+      "value": 10.0,
+      "limit": 10.0,
+      "pass": true
+    },
+    {
+      "layer": "L3",
+      "constraint": "BER",
+      "value": 1e-09,
+      "limit": 1e-08,
+      "pass": true
+    },
+    {
+      "layer": "L3",
+      "constraint": "high_variation",
+      "value": 1,
+      "limit": 1,
+      "pass": true,
+      "detail": "high BTI-variation"
+    },
+    {
+      "layer": "L3",
+      "constraint": "endurance",
+      "value": 1670837402.34375,
+      "limit": 1000000000000.0,
+      "pass": true,
+      "writes_per_request": 0.01
+    },
+    {
+      "layer": "L3",
+      "constraint": "refresh<=retention",
+      "value": 10.0,
+      "limit": 10.0,
+      "pass": true
+    }
+  ],
+  "offchip_reach_probability": 0.0009196986029286076,
+  "name": "Requested SRAM / TFET-eDRAM / OSFET-eDRAM mapping",
+  "selected_workload": "attention",
+  "guidance": {
+    "name": "balanced_latency_power",
+    "weights": {
+      "average_latency_ns": 1.0,
+      "average_power_mw": 1.0
+    },
+    "normalizers": {
+      "average_latency_ns": 10.0,
+      "average_power_mw": 100.0
+    },
+    "limits": {},
+    "destiny_optimization_target": null,
+    "terms": {
+      "average_latency_ns": {
+        "value": 2.3350282380606644,
+        "normalizer": 10.0,
+        "normalized": 0.23350282380606643,
+        "weight": 1.0
+      },
+      "average_power_mw": {
+        "value": 142.98782982181206,
+        "normalizer": 100.0,
+        "normalized": 1.4298782982181206,
+        "weight": 1.0
+      }
+    },
+    "cost": 0.3338806203329439,
+    "score": 2.9950824908699567,
+    "limit_checks": []
+  },
+  "guidance_score": 2.9950824908699567,
+  "layers": [
+    {
+      "name": "L1",
+      "device": "SRAM",
+      "device_family": "SRAM",
+      "destiny_config": "config/.scope-cache/l1_sram_32k_8w_readedp.cfg",
+      "capacity_bytes": 32768,
+      "associativity": 8,
+      "line_bytes": 64,
+      "replacement_policy": "LRU",
+      "banks": 1,
+      "sram_baseline_capacity_bytes": 32768,
+      "density_capacity_scale": 1.0,
+      "ideal_density_capacity_bytes": 32768,
+      "actual_capacity_scale": 1.0,
+      "destiny_optimization_target": "ReadEDP",
+      "device_rows_per_bank": 512,
+      "device_library_values": {
+        "family": "SRAM",
+        "destiny_cfg": "config/devices/sram.cfg",
+        "read_latency": {
+          "model": "constant",
+          "value_ns": 1.0,
+          "approximate": true
+        },
+        "read_energy": {
+          "model": "constant",
+          "value_fj_per_bit": 21.5
+        },
+        "write_latency": {
+          "model": "constant",
+          "value_ns": 1.0,
+          "approximate": true
+        },
+        "write_energy": {
+          "model": "constant",
+          "value_fj_per_bit": 16.2
+        },
+        "leakage": {
+          "model": "constant",
+          "value_pw_per_bit": 27.5
+        },
+        "refresh": {
+          "model": "constant",
+          "value_aw_per_bit": 0.0
+        },
+        "endurance": {
+          "model": "lower_bound",
+          "writes_per_line": 1000000000000000.0
+        },
+        "variation": "low",
+        "density_f2": 140.0,
+        "density_note": "",
+        "m3d_scalability": "N/A"
+      },
+      "device_derived": {
+        "leakage_power_mw": 0.00720896,
+        "refresh_power_mw": 0.0,
+        "endurance_writes_per_line": 1000000000000000.0,
+        "stacked_tiers": 1,
+        "effective_density_f2": 140.0,
+        "data_cell_area_f2": 36700160.0
+      },
+      "raw_destiny_metrics": {
+        "capacity_bytes": 32768,
+        "associativity": 8,
+        "line_bytes": 64,
+        "hit_latency_ns": 0.148,
+        "miss_latency_ns": 0.088,
+        "write_latency_ns": 0.062,
+        "hit_energy_nj": 0.018,
+        "miss_energy_nj": 0.001,
+        "write_energy_nj": 0.016,
+        "leakage_power_mw": 107.353,
+        "data_array_leakage_power_mw": 88.988,
+        "tag_array_leakage_power_mw": 18.365,
+        "refresh_latency_us": 0.0,
+        "refresh_energy_nj_per_bank": 0.0,
+        "optimization_target": "Read Energy-Delay-Product",
+        "bank_organization": "32 x 64",
+        "mat_organization": "1 x 2",
+        "subarray_size": "8 Rows x 8 Columns",
+        "local_wire": "- Wire Type :     Local Aggressive",
+        "global_wire": "- Wire Type :     Global Aggressive",
+        "buffer_design": "Latency-Optimized"
+      },
+      "effective_metrics": {
+        "capacity_bytes": 32768,
+        "associativity": 8,
+        "line_bytes": 64,
+        "hit_latency_ns": 1.0,
+        "miss_latency_ns": 0.088,
+        "write_latency_ns": 1.0,
+        "hit_energy_nj": 0.018,
+        "miss_energy_nj": 0.001,
+        "write_energy_nj": 0.016,
+        "leakage_power_mw": 0.00720896,
+        "data_array_leakage_power_mw": 0.00720896,
+        "tag_array_leakage_power_mw": 0.0,
+        "refresh_latency_us": 0.0,
+        "refresh_energy_nj_per_bank": 0.0,
+        "optimization_target": "Read Energy-Delay-Product",
+        "bank_organization": "32 x 64",
+        "mat_organization": "1 x 2",
+        "subarray_size": "8 Rows x 8 Columns",
+        "local_wire": "- Wire Type :     Local Aggressive",
+        "global_wire": "- Wire Type :     Global Aggressive",
+        "buffer_design": "Latency-Optimized"
+      },
+      "combination_rule": "dynamic latency/energy = max(DESTINY hierarchy result, Device Library data-bit floor); eDRAM read functions use the matching DESTINY result at Nrow; effective static and refresh power come only from the Device Library while raw DESTINY data/tag leakage is audit-only; endurance/density/variation/M3D come from Device Library"
+    },
+    {
+      "name": "L2",
+      "device": "TFET-eDRAM",
+      "device_family": "eDRAM",
+      "destiny_config": "config/.scope-cache/l2_tfet_edram_4096k_8w_readedp.cfg",
+      "capacity_bytes": 4194304,
+      "associativity": 8,
+      "line_bytes": 64,
+      "replacement_policy": "LRU",
+      "banks": 4,
+      "sram_baseline_capacity_bytes": 1048576,
+      "density_capacity_scale": 4.0,
+      "ideal_density_capacity_bytes": 4194304,
+      "actual_capacity_scale": 4.0,
+      "destiny_optimization_target": "ReadEDP",
+      "device_rows_per_bank": 16384,
+      "device_library_values": {
+        "family": "eDRAM",
+        "destiny_cfg": "config/devices/tfet_edram.cfg",
+        "read_latency": {
+          "model": "destiny_Lr_s_Nrow"
+        },
+        "read_energy": {
+          "model": "destiny_Er_Nrow"
+        },
+        "write_latency": {
+          "model": "constant",
+          "value_ns": 3.0,
+          "approximate": false
+        },
+        "write_energy": {
+          "model": "constant",
+          "value_fj_per_bit": 10.0,
+          "approximate": true
+        },
+        "leakage": {
+          "model": "same_as_refresh"
+        },
+        "refresh": {
+          "model": "constant",
+          "value_aw_per_bit": 100.0,
+          "approximate": true
+        },
+        "endurance": {
+          "model": "lower_bound",
+          "writes_per_line": 1000000000000000.0
+        },
+        "variation": "low",
+        "density_f2": 35.0,
+        "density_note": "layout XL",
+        "m3d_scalability": "N/A"
+      },
+      "device_derived": {
+        "leakage_power_mw": 0.0,
+        "refresh_power_mw": 3.3554432e-06,
+        "endurance_writes_per_line": 1000000000000000.0,
+        "stacked_tiers": 1,
+        "effective_density_f2": 35.0,
+        "data_cell_area_f2": 1174405120.0
+      },
+      "raw_destiny_metrics": {
+        "capacity_bytes": 4194304,
+        "associativity": 8,
+        "line_bytes": 64,
+        "hit_latency_ns": 0.865,
+        "miss_latency_ns": 0.163,
+        "write_latency_ns": 0.702,
+        "hit_energy_nj": 0.092,
+        "miss_energy_nj": 0.002,
+        "write_energy_nj": 0.098,
+        "leakage_power_mw": 1656.889,
+        "data_array_leakage_power_mw": 1392.293,
+        "tag_array_leakage_power_mw": 264.596,
+        "refresh_latency_us": 39.502,
+        "refresh_energy_nj_per_bank": 251.529,
+        "optimization_target": "Read Energy-Delay-Product",
+        "bank_organization": "8 x 256",
+        "mat_organization": "2 x 2",
+        "subarray_size": "256 Rows x 16 Columns",
+        "local_wire": "- Wire Type :     Local Aggressive",
+        "global_wire": "- Wire Type :     Global Aggressive",
+        "buffer_design": "Latency-Optimized"
+      },
+      "effective_metrics": {
+        "capacity_bytes": 4194304,
+        "associativity": 8,
+        "line_bytes": 64,
+        "hit_latency_ns": 0.865,
+        "miss_latency_ns": 0.163,
+        "write_latency_ns": 3.0,
+        "hit_energy_nj": 0.092,
+        "miss_energy_nj": 0.002,
+        "write_energy_nj": 0.098,
+        "leakage_power_mw": 0.0,
+        "data_array_leakage_power_mw": 0.0,
+        "tag_array_leakage_power_mw": 0.0,
+        "refresh_latency_us": 39.502,
+        "refresh_energy_nj_per_bank": 251.529,
+        "optimization_target": "Read Energy-Delay-Product",
+        "bank_organization": "8 x 256",
+        "mat_organization": "2 x 2",
+        "subarray_size": "256 Rows x 16 Columns",
+        "local_wire": "- Wire Type :     Local Aggressive",
+        "global_wire": "- Wire Type :     Global Aggressive",
+        "buffer_design": "Latency-Optimized"
+      },
+      "combination_rule": "dynamic latency/energy = max(DESTINY hierarchy result, Device Library data-bit floor); eDRAM read functions use the matching DESTINY result at Nrow; effective static and refresh power come only from the Device Library while raw DESTINY data/tag leakage is audit-only; endurance/density/variation/M3D come from Device Library"
+    },
+    {
+      "name": "L3",
+      "device": "OSFET-eDRAM",
+      "device_family": "eDRAM",
+      "destiny_config": "config/.scope-cache/l3_osfet_edram_65536k_16w_readedp.cfg",
+      "capacity_bytes": 67108864,
+      "associativity": 16,
+      "line_bytes": 64,
+      "replacement_policy": "LRU",
+      "banks": 8,
+      "sram_baseline_capacity_bytes": 4194304,
+      "density_capacity_scale": 16.0,
+      "ideal_density_capacity_bytes": 67108864,
+      "actual_capacity_scale": 16.0,
+      "destiny_optimization_target": "ReadEDP",
+      "device_rows_per_bank": 131072,
+      "device_library_values": {
+        "family": "eDRAM",
+        "destiny_cfg": "config/devices/osfet_edram.cfg",
+        "read_latency": {
+          "model": "destiny_Lr_s_Nrow",
+          "hybrid": "Lr,s(Nrow)",
+          "pure": "Lr,o(Nrow)",
+          "selected_path": "hybrid"
+        },
+        "read_energy": {
+          "model": "destiny_Er_Nrow"
+        },
+        "write_latency": {
+          "model": "constant",
+          "value_ns": 10.0,
+          "approximate": true
+        },
+        "write_energy": {
+          "model": "constant",
+          "value_fj_per_bit": 10.0,
+          "approximate": true
+        },
+        "leakage": {
+          "model": "same_as_refresh"
+        },
+        "refresh": {
+          "model": "constant",
+          "value_aw_per_bit": 100.0,
+          "approximate": true
+        },
+        "endurance": {
+          "model": "BTI_required",
+          "writes_per_line": null
+        },
+        "variation": "high BTI-variation",
+        "density_f2": 35.0,
+        "density_divisor": "N stacked tiers",
+        "density_note": "35/N (stacked)",
+        "m3d_scalability": "4 tier 2TOC"
+      },
+      "device_derived": {
+        "leakage_power_mw": 0.0,
+        "refresh_power_mw": 5.36870912e-05,
+        "endurance_writes_per_line": 1000000000000.0,
+        "stacked_tiers": 4,
+        "effective_density_f2": 8.75,
+        "data_cell_area_f2": 4697620480.0
+      },
+      "raw_destiny_metrics": {
+        "capacity_bytes": 67108864,
+        "associativity": 16,
+        "line_bytes": 64,
+        "hit_latency_ns": 1.833,
+        "miss_latency_ns": 0.172,
+        "write_latency_ns": 1.661,
+        "hit_energy_nj": 0.382,
+        "miss_energy_nj": 0.021,
+        "write_energy_nj": 0.397,
+        "leakage_power_mw": 27235.784,
+        "data_array_leakage_power_mw": 22436.77,
+        "tag_array_leakage_power_mw": 4799.013,
+        "refresh_latency_us": 207.045,
+        "refresh_energy_nj_per_bank": 1315.28,
+        "optimization_target": "Read Energy-Delay-Product",
+        "bank_organization": "8 x 512 x 4",
+        "mat_organization": "2 x 2",
+        "subarray_size": "512 Rows x 16 Columns",
+        "local_wire": "- Wire Type :     Local Aggressive",
+        "global_wire": "- Wire Type :     Global Aggressive",
+        "buffer_design": "Latency-Optimized"
+      },
+      "effective_metrics": {
+        "capacity_bytes": 67108864,
+        "associativity": 16,
+        "line_bytes": 64,
+        "hit_latency_ns": 1.833,
+        "miss_latency_ns": 0.172,
+        "write_latency_ns": 10.0,
+        "hit_energy_nj": 0.382,
+        "miss_energy_nj": 0.021,
+        "write_energy_nj": 0.397,
+        "leakage_power_mw": 0.0,
+        "data_array_leakage_power_mw": 0.0,
+        "tag_array_leakage_power_mw": 0.0,
+        "refresh_latency_us": 207.045,
+        "refresh_energy_nj_per_bank": 1315.28,
+        "optimization_target": "Read Energy-Delay-Product",
+        "bank_organization": "8 x 512 x 4",
+        "mat_organization": "2 x 2",
+        "subarray_size": "512 Rows x 16 Columns",
+        "local_wire": "- Wire Type :     Local Aggressive",
+        "global_wire": "- Wire Type :     Global Aggressive",
+        "buffer_design": "Latency-Optimized"
+      },
+      "combination_rule": "dynamic latency/energy = max(DESTINY hierarchy result, Device Library data-bit floor); eDRAM read functions use the matching DESTINY result at Nrow; effective static and refresh power come only from the Device Library while raw DESTINY data/tag leakage is audit-only; endurance/density/variation/M3D come from Device Library"
+    }
+  ],
+  "crossbars": [
+    {
+      "name": "L1-L2 ideal crossbar",
+      "latency_ns": 2.0,
+      "energy_nj": 0.115776,
+      "request_cycles": 1.0,
+      "response_cycles": 1.0,
+      "clock_ghz": 1.0,
+      "energy_pj_per_bit": 0.201,
+      "transaction_bits": 576
+    },
+    {
+      "name": "L2-L3 ideal crossbar",
+      "latency_ns": 2.0,
+      "energy_nj": 0.115776,
+      "request_cycles": 1.0,
+      "response_cycles": 1.0,
+      "clock_ghz": 1.0,
+      "energy_pj_per_bit": 0.201,
+      "transaction_bits": 576
+    }
+  ],
+  "hit_rate_model": {
+    "mode": "operator",
+    "parameters": {
+      "mode": "operator",
+      "reuse_window_bytes": {
+        "L1": 65536,
+        "L2": 2097152,
+        "L3": 8388608
+      },
+      "locality_factor": {
+        "L1": 2.0,
+        "L2": 2.0,
+        "L3": 2.0
+      },
+      "reference_associativity": {
+        "L1": 8,
+        "L2": 8,
+        "L3": 16
+      },
+      "max_hit_rate": 0.95,
+      "offchip_writebacks_per_request": 0.002
+    },
+    "observed_read_fraction": 0.82,
+    "writebacks_per_request": [
+      0.0,
+      0.02,
+      0.01
+    ],
+    "offchip_writebacks_per_request": 0.002
+  },
+  "workload": {
+    "description": "OpenVLA/Llama-2-7B BF16 tiled self-attention behavior-level profile",
+    "read_fraction": 0.82,
+    "memory_access_rate_per_s": 1000000000,
+    "lifetime_seconds": 157680000,
+    "operator_shape": {
+      "hidden_size": 4096,
+      "num_attention_heads": 32,
+      "head_dim": 128,
+      "tile_tokens": 64,
+      "bytes_per_element": 2
+    },
+    "hit_rate_model": {
+      "mode": "operator",
+      "reuse_window_bytes": {
+        "L1": 65536,
+        "L2": 2097152,
+        "L3": 8388608
+      },
+      "locality_factor": {
+        "L1": 2.0,
+        "L2": 2.0,
+        "L3": 2.0
+      },
+      "reference_associativity": {
+        "L1": 8,
+        "L2": 8,
+        "L3": 16
+      },
+      "max_hit_rate": 0.95,
+      "offchip_writebacks_per_request": 0.002
+    }
+  },
+  "off_chip": {
+    "latency_ns": 45.812,
+    "energy_nj": 10.24
+  },
+  "exploration": {
+    "evaluated_designs": 1,
+    "feasible_designs": 1,
+    "selected_highest_feasible_fom": true,
+    "designs": [
+      {
+        "devices": [
+          "SRAM",
+          "TFET-eDRAM",
+          "OSFET-eDRAM"
+        ],
+        "average_latency_ns": 2.3350282380606644,
+        "average_power_mw": 142.98782982181206,
+        "fom_per_ns_mw": 0.0029950824908699567,
+        "guidance_score": 2.9950824908699567,
+        "capacities_bytes": [
+          32768,
+          4194304,
+          67108864
+        ],
+        "destiny_optimization_targets": [
+          "ReadEDP",
+          "ReadEDP",
+          "ReadEDP"
+        ],
+        "feasible": true
+      }
+    ]
+  },
+  "device_library": {
+    "path": "config/device_library.json",
+    "schema_version": 2,
+    "source": "User-provided Device Library screenshots (2026-08-28)",
+    "semantics": {
+      "dynamic_energy_unit": "fJ/bit/access",
+      "leakage_unit": "per data bit unless a model is named",
+      "refresh_unit": "per data bit",
+      "greater_than_values": "stored as a conservative numeric lower bound",
+      "edram_read_functions": "evaluated by the matching DESTINY eDRAM instance at its configured Nrow",
+      "effective_static_power": "SRAM uses the table leakage; MRAM/eDRAM are zero-static in this behavior-level model; eDRAM retention cost is counted only as refresh power"
+    }
+  },
+  "auto_selection": {
+    "enabled": true,
+    "devices": [
+      "SRAM",
+      "TFET-eDRAM",
+      "OSFET-eDRAM"
+    ],
+    "refresh_interval_us": 10.0,
+    "retention_time_us": 10.0,
+    "bti_endurance_writes_per_line": 1000000000000.0
+  },
+  "instructions": [
+    {
+      "op": "load",
+      "hit_level": "L1",
+      "write_policy": "write-back + write-allocate",
+      "latency_ns": 1.0,
+      "dynamic_energy_nj": 0.018,
+      "serialized_dynamic_power_mw": 18.0,
+      "static_power_mw": 0.00720896,
+      "refresh_power_mw": 5.70425344e-05,
+      "serialized_total_power_mw": 18.0072660025344,
+      "breakdown": [
+        {
+          "component": "L1 read hit",
+          "latency_ns": 1.0,
+          "physical_latency_ns": 1.0,
+          "energy_nj": 0.018,
+          "on_critical_path": true
+        }
+      ]
+    },
+    {
+      "op": "store",
+      "hit_level": "L2",
+      "write_policy": "write-back + write-allocate",
+      "latency_ns": 3.9530000000000003,
+      "dynamic_energy_nj": 0.22477600000000003,
+      "serialized_dynamic_power_mw": 56.86213002782697,
+      "static_power_mw": 0.00720896,
+      "refresh_power_mw": 5.70425344e-05,
+      "serialized_total_power_mw": 56.86939603036137,
+      "breakdown": [
+        {
+          "component": "L1 tag miss",
+          "latency_ns": 0.088,
+          "physical_latency_ns": 0.088,
+          "energy_nj": 0.001,
+          "on_critical_path": true
+        },
+        {
+          "component": "L1-L2 ideal crossbar",
+          "latency_ns": 2.0,
+          "physical_latency_ns": 2.0,
+          "energy_nj": 0.115776,
+          "on_critical_path": true
+        },
+        {
+          "component": "L2 read hit",
+          "latency_ns": 0.865,
+          "physical_latency_ns": 0.865,
+          "energy_nj": 0.092,
+          "on_critical_path": true
+        },
+        {
+          "component": "L1 allocate + store",
+          "latency_ns": 1.0,
+          "physical_latency_ns": 1.0,
+          "energy_nj": 0.016,
+          "on_critical_path": true
+        }
+      ]
+    },
+    {
+      "op": "load",
+      "hit_level": "L3",
+      "write_policy": "write-back + write-allocate",
+      "latency_ns": 6.084,
+      "dynamic_energy_nj": 0.730552,
+      "serialized_dynamic_power_mw": 120.07758053911901,
+      "static_power_mw": 0.00720896,
+      "refresh_power_mw": 5.70425344e-05,
+      "serialized_total_power_mw": 120.0848465416534,
+      "breakdown": [
+        {
+          "component": "L1 tag miss",
+          "latency_ns": 0.088,
+          "physical_latency_ns": 0.088,
+          "energy_nj": 0.001,
+          "on_critical_path": true
+        },
+        {
+          "component": "L1-L2 ideal crossbar",
+          "latency_ns": 2.0,
+          "physical_latency_ns": 2.0,
+          "energy_nj": 0.115776,
+          "on_critical_path": true
+        },
+        {
+          "component": "L2 tag miss",
+          "latency_ns": 0.163,
+          "physical_latency_ns": 0.163,
+          "energy_nj": 0.002,
+          "on_critical_path": true
+        },
+        {
+          "component": "L2-L3 ideal crossbar",
+          "latency_ns": 2.0,
+          "physical_latency_ns": 2.0,
+          "energy_nj": 0.115776,
+          "on_critical_path": true
+        },
+        {
+          "component": "L3 read hit",
+          "latency_ns": 1.833,
+          "physical_latency_ns": 1.833,
+          "energy_nj": 0.382,
+          "on_critical_path": true
+        },
+        {
+          "component": "L2 refill",
+          "latency_ns": 0.0,
+          "physical_latency_ns": 3.0,
+          "energy_nj": 0.098,
+          "on_critical_path": false
+        },
+        {
+          "component": "L1 refill",
+          "latency_ns": 0.0,
+          "physical_latency_ns": 1.0,
+          "energy_nj": 0.016,
+          "on_critical_path": false
+        }
+      ]
+    },
+    {
+      "op": "load",
+      "hit_level": "OFF",
+      "write_policy": "write-back + write-allocate",
+      "latency_ns": 50.235,
+      "dynamic_energy_nj": 11.006552000000001,
+      "serialized_dynamic_power_mw": 219.1012640589231,
+      "static_power_mw": 0.00720896,
+      "refresh_power_mw": 5.70425344e-05,
+      "serialized_total_power_mw": 219.10853006145751,
+      "breakdown": [
+        {
+          "component": "L1 tag miss",
+          "latency_ns": 0.088,
+          "physical_latency_ns": 0.088,
+          "energy_nj": 0.001,
+          "on_critical_path": true
+        },
+        {
+          "component": "L1-L2 ideal crossbar",
+          "latency_ns": 2.0,
+          "physical_latency_ns": 2.0,
+          "energy_nj": 0.115776,
+          "on_critical_path": true
+        },
+        {
+          "component": "L2 tag miss",
+          "latency_ns": 0.163,
+          "physical_latency_ns": 0.163,
+          "energy_nj": 0.002,
+          "on_critical_path": true
+        },
+        {
+          "component": "L2-L3 ideal crossbar",
+          "latency_ns": 2.0,
+          "physical_latency_ns": 2.0,
+          "energy_nj": 0.115776,
+          "on_critical_path": true
+        },
+        {
+          "component": "L3 tag miss",
+          "latency_ns": 0.172,
+          "physical_latency_ns": 0.172,
+          "energy_nj": 0.021,
+          "on_critical_path": true
+        },
+        {
+          "component": "off-chip read",
+          "latency_ns": 45.812,
+          "physical_latency_ns": 45.812,
+          "energy_nj": 10.24,
+          "on_critical_path": true
+        },
+        {
+          "component": "L3 refill",
+          "latency_ns": 0.0,
+          "physical_latency_ns": 10.0,
+          "energy_nj": 0.397,
+          "on_critical_path": false
+        },
+        {
+          "component": "L2 refill",
+          "latency_ns": 0.0,
+          "physical_latency_ns": 3.0,
+          "energy_nj": 0.098,
+          "on_critical_path": false
+        },
+        {
+          "component": "L1 refill",
+          "latency_ns": 0.0,
+          "physical_latency_ns": 1.0,
+          "energy_nj": 0.016,
+          "on_critical_path": false
+        }
+      ]
+    }
+  ]
+}

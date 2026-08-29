@@ -1,0 +1,23 @@
+-MemCellType: SRAM
+-CellArea (F^2): 140
+-SRAMCellNMOSWidth (F): 2.08
+-SRAMCellPMOSWidth (F): 1.23
+-AccessCMOSWidth (F): 1.31
+-AccessType: CMOS
+-MinSenseVoltage (mV): 80
+-CellAspectRatio: 1.46
+-ReadVoltage (V): 1.1
+-Stitching: 16
+
+// Device Library metadata (authoritative values used by SCOPE)
+-ScopeDevice: SRAM
+-ScopeReadLatency: ~1_ns
+-ScopeReadEnergy: 21.5_fJ_per_bit
+-ScopeWriteLatency: ~1_ns
+-ScopeWriteEnergy: 16.2_fJ_per_bit
+-ScopeLeakagePower: 27.5_pW_per_bit
+-ScopeRefreshPower: 0_uW
+-ScopeEndurance: >1e15
+-ScopeVariation: low
+-ScopeDensity: 140_F2
+-ScopeM3DScalability: N/A

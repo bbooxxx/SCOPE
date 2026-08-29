@@ -1,36 +1,49 @@
-# SCOPE
+# SCOPE v2
 
-SCOPE 在原 DESTINY 之上组成可配置的三级片上缓存。每层独立运行一个 DESTINY 实例，L1/L2/L3 均可选择 SRAM、MRAM 或 eDRAM 家族；上层行为模型给出从 load/store 到 L1–L2–L3–片外的端到端延迟、能耗、平均功耗和 FoM。
+SCOPE 是构建在 DESTINY 之上的三级片上缓存行为级 demo。它不生成精确访存 trace，而是把三个独立 DESTINY 实例串成 L1–L2–L3，对一条 load/store 和平均 workload 输出端到端 latency、dynamic/static/refresh power 及 breakdown。
+
+v2 支持从应用到硬件的自动选择：工作负载 → 可配置 Guidance/FoM → 每层器件 → 密度换算容量 → DESTINY bank/mat/subarray/外围结构 → 端到端结果。L1/L2/L3 均可使用任意一种库内器件，不绑定 SRAM/eDRAM/MRAM 位置。
 
 ## 快速运行
 
 ```bash
 make -j4
 make test-scope
-python3 scope.py config/scope_example.json --json-output results/scope_example.json
+
+# Attention：7³=343 种器件映射自动选优
+python3 scope.py config/scope_v2.json \
+  --json-output results/scope_v2_attention.json
+
+# FFN：使用另一组 Guidance
+python3 scope.py config/scope_v2.json --workload ffn \
+  --json-output results/scope_v2_ffn.json
+
+# 指定 SRAM / TFET-eDRAM / OSFET-eDRAM 映射
+make scope-requested
 ```
 
-当前示例（SRAM / 2D-eDRAM / SOT-MRAM）的结果是 `13.036440 ns`、`396.456403 mW`，全部约束通过。终端会同时打印 L3 load、L2 store 和片外 load 三条具体路径。
+## 配置要点
 
-`--explore` 已实际验证 27 个 SRAM/SOT-MRAM/2D-eDRAM 三级组合，27 个均完成并通过约束；本次最高 FoM 映射为 SRAM / SOT-MRAM / SOT-MRAM，结果 `12.765098 ns`、`216.892851 mW`，详见 `results/scope_explore.json`。
+- `workloads.attention/ffn`：读写比例、请求率、算子形状、局部性和应用 Guidance；用 `--workload` 选择。
+- `guidance.weights`：任意组合 `latency`、`power`、`energy` 的非负指数；评分为归一化指标幂乘积的倒数。还可设置 `limits` 或显式 `destiny_optimization_target`。
+- `capacity.mode`：`density_scaled` 按 `140 F² / 器件有效 F²` 从 SRAM 基线等面积扩容；`fixed` 则直接使用每层 `capacity_bytes`。DESTINY 只支持合法阵列容量，非 2 次幂理想容量会量化到最近 2 次幂，JSON 同时保留理想/实际值。
+- `layers[].devices`：可限制某层的候选集；不设时自动遍历全部 7 种。容量、相联度、64 B 行宽、LRU/FIFO/RANDOM、bank、BER、刷新和寿命参数都可改。
+- NoC 和 write policy 在选优中固定：两跳 ideal crossbar、write-back + write-allocate。
 
-## 配置
+器件库只包含 `STT-MRAM`、`SOT-MRAM`、`SRAM`、`Si-eDRAM`、`TFET-eDRAM`、`2D-eDRAM`、`OSFET-eDRAM`。每种的 `.cell/.cfg` 位于 `config/devices/`，并包含截图表格中的读/写延迟与能耗、漏电、刷新、寿命、variation、密度和 M3D 指标。
 
-- `config/scope_example.json`：三级容量、相联度、bank、替换策略、BER、刷新、工作负载、crossbar 和片外参数。
-- `config/device_library.json`：用户截图中的 7 种器件及全部新指标。
-- `config/scope_l{1,2,3}_{sram,edram,mram}.cfg`：每个层级的三种 DESTINY family 配置。
-- `results/scope_example.json`：完整 raw/effective 指标、分解和约束结果。
+## 当前实测
 
-器件与 DESTINY family 必须匹配：SRAM 用 `_sram.cfg`，STT/SOT-MRAM 用 `_mram.cfg`，四种 eDRAM 用 `_edram.cfg`。任何层都可这样更换，并非固定 L1/L2/L3 映射。同一 family 内只需改 `device`；OSFET-eDRAM 还需提供 `bti_endurance_writes_per_line`，且 high-BTI variation 默认不通过，需显式设置 `allow_high_variation=true` 才放行。
+| workload / 映射 | L1 / L2 / L3 | 平均延迟 | 平均总功耗 | static |
+|---|---|---:|---:|---:|
+| Attention 自动 | Si-eDRAM / Si-eDRAM / TFET-eDRAM | 0.656483 ns | 65.316753 mW | 0 mW |
+| FFN 自动 | Si-eDRAM / Si-eDRAM / TFET-eDRAM | 1.358437 ns | 101.565525 mW | 0 mW |
+| 指定 Attention | SRAM / TFET-eDRAM / OSFET-eDRAM | 2.335028 ns | 142.987830 mW | 0.007209 mW |
 
-```bash
-# 指定一条行为路径
-python3 scope.py config/scope_example.json --op load --hit-level OFF
+Attention 使用 `ReadEDP`，FFN 因功耗权重更高自动切换为 `ReadDynamicEnergy`，并得到不同的内部 bank/mat/subarray 结构。指定映射的容量为 32 KiB / 4 MiB / 64 MiB，分别对应 SRAM 的 1×、TFET-eDRAM 的 4×和四层 OSFET-eDRAM 的 16×密度扩容。
 
-# 展开每层 candidates，选择满足约束且 FoM 最高的组合
-python3 scope.py config/scope_example.json --explore --json-output results/explore.json
-```
+完整输入、breakdown、约束和逐指令结果见 [v2-simulation.md](v2-simulation.md) 及 `results/scope_v2_*.json`。所有数据来源另整理在本地 `v2-data.md`，该文件已被 Git 忽略，不会上传。
 
-命中率支持 `synthetic`、`fixed`、`trace` 三种模式；trace 为每行一个 `{"op":"load|store","address":"0x..."}` 的 JSONL 文件。默认策略为 write-back + write-allocate，填充和脏行写回默认不在需求关键路径，但其能耗会计入平均功耗。
+## 模型边界
 
-完整方法、公式、参数出处和当前结果见 [建模方案.md](建模方案.md)，实现取舍与验证记录见 [探索过程.md](探索过程.md)。原 DESTINY 说明仍保留在 [README](README)。
+这是用于快速比较的行为级 demo，不声称替代 gem5/真实 trace/电路级签核。命中率是容量、workload 复用窗口、替换策略和相联度的可配置函数；容量增大时可超过基线 60–80% 并截止在配置上限 95%。eDRAM 表中的 `leakage=Pref` 只在 refresh 中计一次，不重复算 static；raw DESTINY 漏电仍保留在 JSON 供审计。
