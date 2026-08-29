@@ -2,6 +2,7 @@
 
 #target := tsvtest
 target := destiny
+model_target := scope_model
 
 # define tool chain
 CXX := g++
@@ -9,7 +10,7 @@ RM := rm -f
 
 # define build options
 # compile options
-CXXFLAGS := -Wall 
+CXXFLAGS := -std=c++17 -Wall
 # link options
 LDFLAGS :=
 # link librarires
@@ -18,17 +19,18 @@ LDLIBS :=
 OUTDIR := obj
 
 # construct list of .cpp and their corresponding .o and .d files
-SRC := main.cpp $(wildcard component/*.cpp)
-INC := -I. -Icomponent
+SRC := main.cpp $(wildcard component/*.cpp) $(wildcard model/*.cpp)
+INC := -I. -Icomponent -Imodel
 DBG :=
 OBJ := $(OUTDIR)/main.o $(patsubst component/%.cpp,$(OUTDIR)/%.o,$(wildcard component/*.cpp))
+MODEL_OBJ := $(patsubst model/%.cpp,$(OUTDIR)/model_%.o,$(wildcard model/*.cpp))
 DEP := Makefile.dep
 
 # file disambiguity is achieved via the .PHONY directive
-.PHONY : all clean dbg scope scope-requested test-scope
+.PHONY : all clean dbg scope scope-v4 scope-requested test-scope
 
 all: CXXFLAGS += -O3 -mtune=native
-all: dir $(target)
+all: dir $(target) $(model_target)
 
 dbg: DBG += -ggdb -g #-DNVSIM3DDEBUG=1
 dbg: dir $(target)
@@ -39,22 +41,31 @@ dir:
 $(target): $(OBJ)
 	$(CXX) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
+$(model_target): $(MODEL_OBJ)
+	$(CXX) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
 clean:
-	$(RM) $(target) $(DEP) $(OBJ)
+	$(RM) $(target) $(model_target) $(DEP) $(OBJ) $(MODEL_OBJ)
 
 scope: all
 	python3 scope.py config/scope_v3.json --json-output results/scope_v3.json
 
+scope-v4: all
+	python3 scope.py config/scope_v4.json --explore --json-output results/scope_v4_attention.json
+
 scope-requested: all
 	python3 scope.py config/scope_v2_requested.json --json-output results/scope_v2_requested.json
 
-test-scope:
+test-scope: $(model_target)
 	python3 -m unittest discover -s tests -v
 
 $(OUTDIR)/main.o: main.cpp
 	$(CXX) $(CXXFLAGS) $(DBG) $(INC) -c $< -o $@
 
 $(OUTDIR)/%.o: component/%.cpp
+	$(CXX) $(CXXFLAGS) $(DBG) $(INC) -c $< -o $@
+
+$(OUTDIR)/model_%.o: model/%.cpp
 	$(CXX) $(CXXFLAGS) $(DBG) $(INC) -c $< -o $@
 
 depend $(DEP):

@@ -1,0 +1,173 @@
+{
+  "name": "SCOPE v4 OpenVLA cache design exploration",
+  "destiny_binary": "destiny",
+  "device_library": "config/device_library_v3.json",
+  "selected_workload": "attention",
+  "core_to_l1_latency_ns": 0.0,
+  "refill_on_critical_path": false,
+  "constraints": {"ber_max": 1e-8},
+  "capacity": {
+    "mode": "density_scaled",
+    "destiny_power_of_two": true,
+    "sram_density_f2": 140.0,
+    "sram_baseline_bytes": {
+      "L1": 32768,
+      "L2": 1048576,
+      "L3": 4194304
+    }
+  },
+  "auto_selection": {
+    "enabled": true,
+    "devices": [
+      "STT-MRAM", "SOT-MRAM", "SRAM", "Si-eDRAM",
+      "TFET-eDRAM", "2D-eDRAM", "OSFET-eDRAM"
+    ],
+    "refresh_interval_us": 10.0,
+    "retention_time_us": 10.0,
+    "bti_endurance_writes_per_line": 1e30
+  },
+  "workloads": {
+    "attention": {
+      "description": "One OpenVLA-7B BF16 Attention layer using a seeded FlashAttention ISA-access sample",
+      "read_fraction": 0.75,
+      "memory_access_rate_per_s": 1,
+      "lifetime_seconds": 157680000,
+      "hit_rate_model": {
+        "mode": "cpp_openvla_trace",
+        "binary": "scope_model",
+        "operator": "attention",
+        "policy_frequency_hz": 5.0,
+        "seed": 20260829,
+        "isa_access_bytes": 16,
+        "working_set_stride_bytes": 64,
+        "sampled_working_set_bytes": 25165824,
+        "operator_shape": {
+          "sequence_tokens": 295,
+          "vision_tokens": 256,
+          "text_tokens": 32,
+          "action_tokens": 7,
+          "hidden_size": 4096,
+          "num_attention_heads": 32,
+          "head_dim": 128,
+          "tile_m": 16,
+          "tile_n": 64,
+          "tile_k": 32,
+          "bytes_per_element": 2
+        }
+      },
+      "guidance": {
+        "name": "latency_power_product",
+        "weights": {"latency": 1.0, "power": 1.0},
+        "normalizers": {"latency": 10.0, "power": 1.0}
+      }
+    },
+    "ffn": {
+      "description": "One OpenVLA-7B BF16 SwiGLU FFN layer using seeded tiled GEMM/GEMV ISA accesses",
+      "read_fraction": 0.75,
+      "memory_access_rate_per_s": 1,
+      "lifetime_seconds": 157680000,
+      "hit_rate_model": {
+        "mode": "cpp_openvla_trace",
+        "binary": "scope_model",
+        "operator": "ffn",
+        "policy_frequency_hz": 5.0,
+        "seed": 20260829,
+        "isa_access_bytes": 16,
+        "working_set_stride_bytes": 64,
+        "sampled_working_set_bytes": 33554432,
+        "operator_shape": {
+          "sequence_tokens": 295,
+          "vision_tokens": 256,
+          "text_tokens": 32,
+          "action_tokens": 7,
+          "hidden_size": 4096,
+          "intermediate_size": 11008,
+          "tile_m": 16,
+          "tile_n": 128,
+          "tile_k": 32,
+          "bytes_per_element": 2
+        }
+      },
+      "guidance": {
+        "name": "latency_power_product",
+        "weights": {"latency": 1.0, "power": 1.0},
+        "normalizers": {"latency": 10.0, "power": 1.0}
+      }
+    }
+  },
+  "layers": [
+    {
+      "name": "L1",
+      "devices": ["SRAM", "SOT-MRAM", "TFET-eDRAM"],
+      "device_overrides": {
+        "TFET-eDRAM": {"peripheral_latency_ns": 0.25}
+      },
+      "associativity": 8,
+      "line_bytes": 64,
+      "replacement_policy": "LRU",
+      "banks": 1,
+      "ber": 1e-12,
+      "wear_leveling_efficiency": 1.0,
+      "estimated_writebacks_per_request": 0.0,
+      "allow_high_variation": false
+    },
+    {
+      "name": "L2",
+      "devices": ["SRAM", "SOT-MRAM", "TFET-eDRAM", "2D-eDRAM"],
+      "associativity": 8,
+      "line_bytes": 64,
+      "replacement_policy": "LRU",
+      "banks": 4,
+      "ber": 1e-10,
+      "wear_leveling_efficiency": 1.0,
+      "estimated_writebacks_per_request": 0.02,
+      "allow_high_variation": false
+    },
+    {
+      "name": "L3",
+      "devices": ["SRAM", "TFET-eDRAM", "2D-eDRAM", "OSFET-eDRAM"],
+      "associativity": 16,
+      "line_bytes": 64,
+      "replacement_policy": "LRU",
+      "banks": 8,
+      "ber": 1e-9,
+      "wear_leveling_efficiency": 0.9,
+      "estimated_writebacks_per_request": 0.01,
+      "allow_high_variation": true
+    }
+  ],
+  "crossbars": [
+    {
+      "name": "L1-L2 crossbar",
+      "request_cycles": 1,
+      "response_cycles": 1,
+      "clock_ghz": 1.0,
+      "energy_pj_per_bit": 0.201,
+      "transaction_bits": 576
+    },
+    {
+      "name": "L2-L3 crossbar",
+      "request_cycles": 1,
+      "response_cycles": 1,
+      "clock_ghz": 1.0,
+      "energy_pj_per_bit": 0.201,
+      "transaction_bits": 576
+    }
+  ],
+  "off_chip": {
+    "standard": "LPDDR5-6400",
+    "latency_ns": 67.5,
+    "energy_pj_per_bit": 2.5,
+    "bandwidth_gbps": 204.8,
+    "bus_width_bits": 256,
+    "data_rate_mtps": 6400,
+    "transaction_bytes": 64,
+    "timing_basis": "Ramulator2 LPDDR5-6400 closed-page nRCD+nCL+nBL+nRPpb at 1.25 ns CK"
+  },
+  "instruction_cases": [
+    {"op": "load", "hit_level": "L1"},
+    {"op": "store", "hit_level": "L2"},
+    {"op": "load", "hit_level": "L3"},
+    {"op": "load", "hit_level": "OFF"}
+  ]
+}

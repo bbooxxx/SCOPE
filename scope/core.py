@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import copy
+import hashlib
 import itertools
 import json
 import math
@@ -152,6 +153,13 @@ class CrossbarSpec:
 class OffChipSpec:
     latency_ns: float
     energy_nj: float
+    standard: str = "unspecified"
+    bandwidth_gbps: float = 0.0
+    bus_width_bits: int = 0
+    data_rate_mtps: float = 0.0
+    transaction_bytes: int = 64
+    energy_pj_per_bit: float = 0.0
+    timing_basis: str = ""
 
 
 @dataclass(frozen=True)
@@ -229,6 +237,128 @@ class SetAssociativeCache:
         return evicted
 
 
+_CPP_HIT_RATE_CACHE: Dict[Tuple[Any, ...], HitRateResult] = {}
+
+
+def _cpp_openvla_hit_rates(
+    layers: Sequence[LayerSpec], model: Dict[str, Any], repo_root: Path,
+    read_fraction: float,
+) -> HitRateResult:
+    binary = _resolve_path(
+        repo_root, str(model.get("binary", "scope_model"))
+    ).resolve()
+    if not binary.is_file():
+        completed = subprocess.run(
+            ["make", "-j4", binary.name],
+            cwd=repo_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        if completed.returncode != 0 or not binary.is_file():
+            raise ScopeError(f"failed to build C++ SCOPE model:\n{completed.stdout}")
+
+    shape = dict(model.get("operator_shape", {}))
+    require(shape, "cpp_openvla_trace requires operator_shape")
+    capacities = tuple(layer.capacity_bytes for layer in layers)
+    associativities = tuple(layer.associativity for layer in layers)
+    policies = tuple(layer.replacement_policy for layer in layers)
+    line_bytes = layers[0].line_bytes
+    operator = str(model["operator"]).lower()
+    sampled_working_set_bytes = int(model["sampled_working_set_bytes"])
+    warmup_accesses = int(model.get("warmup_accesses", 0))
+    sample_accesses = int(model.get("sample_accesses", 0))
+    seed = int(model.get("seed", 7))
+    access_bytes = int(model.get("isa_access_bytes", 16))
+    stride_bytes = int(model.get("working_set_stride_bytes", line_bytes))
+    key = (
+        operator, capacities, associativities, policies, line_bytes,
+        sampled_working_set_bytes, warmup_accesses, sample_accesses,
+        seed, access_bytes, stride_bytes, read_fraction,
+        tuple(sorted((str(key), int(value)) for key, value in shape.items())),
+    )
+    cached = _CPP_HIT_RATE_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    arguments = [
+        str(binary),
+        "--operator", operator,
+        "--capacities", ",".join(str(value) for value in capacities),
+        "--associativities", ",".join(str(value) for value in associativities),
+        "--policies", ",".join(policies),
+        "--line-bytes", str(line_bytes),
+        "--sampled-working-set-bytes", str(sampled_working_set_bytes),
+        "--access-bytes", str(access_bytes),
+        "--working-set-stride-bytes", str(stride_bytes),
+        "--read-fraction", str(read_fraction),
+        "--seed", str(seed),
+        "--sequence-tokens", str(shape["sequence_tokens"]),
+        "--hidden-size", str(shape["hidden_size"]),
+        "--attention-heads", str(shape.get("num_attention_heads", 32)),
+        "--head-dimension", str(shape.get("head_dim", 128)),
+        "--intermediate-size", str(shape.get("intermediate_size", 11008)),
+        "--tile-m", str(shape.get("tile_m", shape.get("tile_tokens", 16))),
+        "--tile-n", str(shape.get("tile_n", shape.get("channel_tile", 64))),
+        "--tile-k", str(shape.get("tile_k", 32)),
+    ]
+    if warmup_accesses > 0:
+        arguments.extend(["--warmup-accesses", str(warmup_accesses)])
+    if sample_accesses > 0:
+        arguments.extend(["--sample-accesses", str(sample_accesses)])
+    completed = subprocess.run(
+        arguments,
+        cwd=repo_root,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ScopeError(f"C++ SCOPE model failed:\n{completed.stdout}")
+    try:
+        raw = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ScopeError(
+            f"invalid JSON from C++ SCOPE model:\n{completed.stdout}"
+        ) from exc
+    rates = tuple(float(value) for value in raw["hit_rates"])
+    accesses = tuple(int(value) for value in raw["accesses"])
+    hits = tuple(int(value) for value in raw["hits"])
+    writebacks = tuple(float(value) for value in raw["writebacks_per_request"])
+    require(len(rates) == len(layers),
+            "C++ SCOPE result does not match hierarchy depth")
+    policy_hz = float(model.get("policy_frequency_hz", 5.0))
+    raw.update({
+        "model": "OpenVLA-7B / Llama-2-7B",
+        "source_model_config":
+            "https://github.com/openvla/openvla/blob/main/prismatic/conf/models.py",
+        "cache_method_source": "ChampSim/gem5-style warmup + set-associative LRU",
+        "trace_basis": (
+            "seeded ISA-granularity vector load/store sample from one real-shape "
+            "OpenVLA Attention or FFN layer"
+        ),
+        "hardware_trace_available": False,
+        "selection": "deterministic pseudo-random tensor-address sampling",
+        "memory_access_rate_per_s": int(raw["trace_cycle_accesses"]) * policy_hz,
+        "policy_frequency_hz": policy_hz,
+    })
+    result = HitRateResult(
+        hit_rates=rates,
+        accesses=accesses,
+        hits=hits,
+        writebacks_per_request=writebacks,
+        offchip_writebacks_per_request=float(
+            raw["offchip_writebacks_per_request"]
+        ),
+        observed_read_fraction=float(raw["observed_read_fraction"]),
+        trace_metadata=raw,
+    )
+    _CPP_HIT_RATE_CACHE[key] = result
+    return result
+
+
 class DestinyRunner:
     """Run one untouched DESTINY process per cache level and parse its summary."""
 
@@ -258,6 +388,22 @@ class DestinyRunner:
         if config_path in self._cache:
             return self._cache[config_path]
         require(config_path.is_file(), f"DESTINY config not found: {config_path}")
+        cache_key = hashlib.sha256(
+            config_path.read_bytes()
+            + str(self.binary.stat().st_mtime_ns).encode("ascii")
+            + str(self.binary.stat().st_size).encode("ascii")
+        ).hexdigest()
+        metrics_dir = self.repo_root / "config" / ".scope-cache" / "metrics"
+        metrics_path = metrics_dir / f"{cache_key}.json"
+        if metrics_path.is_file():
+            try:
+                metrics = DestinyMetrics(**json.loads(
+                    metrics_path.read_text(encoding="utf-8")
+                ))
+                self._cache[config_path] = metrics
+                return metrics
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                pass
         try:
             completed = subprocess.run(
                 [str(self.binary), config_path.name],
@@ -278,6 +424,11 @@ class DestinyRunner:
                 f"{completed.stdout}"
             )
         metrics = self.parse_output(completed.stdout)
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+        metrics_path.write_text(
+            json.dumps(asdict(metrics), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         self._cache[config_path] = metrics
         return metrics
 
@@ -717,6 +868,9 @@ def estimate_hit_rates(layers: Sequence[LayerSpec], workload: Dict[str, Any],
     read_fraction = float(workload.get("read_fraction", 0.5))
     require(0.0 <= read_fraction <= 1.0, "read_fraction must be in [0, 1]")
 
+    if mode == "cpp_openvla_trace":
+        return _cpp_openvla_hit_rates(layers, model, repo_root, read_fraction)
+
     if mode == "fixed":
         rates = tuple(float(item["hit_rate"]) for item in workload["fixed_hit_rates"])
         require(len(rates) == len(layers), "fixed_hit_rates must contain one rate per layer")
@@ -789,7 +943,7 @@ def estimate_hit_rates(layers: Sequence[LayerSpec], workload: Dict[str, Any],
 
     require(mode in {"synthetic", "trace", "openvla_operator_trace"},
             "hit_rate_model.mode must be fixed, operator, synthetic, trace, "
-            "or openvla_operator_trace")
+            "openvla_operator_trace, or cpp_openvla_trace")
     line_sizes = {layer.line_bytes for layer in layers}
     require(len(line_sizes) == 1,
             "WB+WA hit-rate simulation requires one cache-line size across all levels")
@@ -1542,9 +1696,12 @@ def design_variants(
     choices: List[List[Dict[str, Any]]] = []
     for layer in layers:
         require(isinstance(layer, dict), "each layer must be an object")
+        device_overrides = layer.get("device_overrides", {})
+        require(isinstance(device_overrides, dict),
+                f"{layer.get('name', 'layer')}: device_overrides must be an object")
         base = {
             key: value for key, value in layer.items()
-            if key not in {"candidates", "devices"}
+            if key not in {"candidates", "devices", "device_overrides"}
         }
         if auto_enabled:
             devices = layer.get("devices", all_devices)
@@ -1564,6 +1721,10 @@ def design_variants(
                 device = str(merged["device"])
                 require(device in device_library,
                         f"unknown automatic device: {device}")
+                override = device_overrides.get(device, {})
+                require(isinstance(override, dict),
+                        f"{base.get('name', 'layer')}: invalid override for {device}")
+                merged.update(copy.deepcopy(override))
                 entry = device_library[device]
                 stacked_tiers = int(merged.get(
                     "stacked_tiers", 4 if "density_divisor" in entry else 1
@@ -1626,9 +1787,21 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
             "config must contain exactly two crossbars")
     crossbars = [build_crossbar(item) for item in crossbars_raw]
     off_raw = raw["off_chip"]
+    transaction_bytes = int(off_raw.get("transaction_bytes", 64))
+    energy_pj_per_bit = float(off_raw.get("energy_pj_per_bit", 0.0))
+    energy_nj = float(off_raw.get(
+        "energy_nj", energy_pj_per_bit * transaction_bytes * 8 / 1000.0
+    ))
     offchip = OffChipSpec(
         latency_ns=float(off_raw["latency_ns"]),
-        energy_nj=float(off_raw["energy_nj"]),
+        energy_nj=energy_nj,
+        standard=str(off_raw.get("standard", "unspecified")),
+        bandwidth_gbps=float(off_raw.get("bandwidth_gbps", 0.0)),
+        bus_width_bits=int(off_raw.get("bus_width_bits", 0)),
+        data_rate_mtps=float(off_raw.get("data_rate_mtps", 0.0)),
+        transaction_bytes=transaction_bytes,
+        energy_pj_per_bit=energy_pj_per_bit,
+        timing_basis=str(off_raw.get("timing_basis", "")),
     )
     require(offchip.latency_ns >= 0.0 and offchip.energy_nj >= 0.0,
             "off-chip latency and energy must be non-negative")
@@ -1704,7 +1877,7 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
                 "terms. eDRAM replaces the selected RBL term with C_RBL*deltaV/Ion and "
                 "0.5*C_RBL*(Vdd^2-(Vdd-deltaV)^2); Si-eDRAM additionally uses row "
                 "read+write refresh power and bandwidth occupancy. Other device values "
-                "come from the v3 Device Library."
+                "come from the selected Device Library."
             ),
         }
         for layer, layer_raw in zip(layer_specs, raw["layers"])

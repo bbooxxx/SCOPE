@@ -1,10 +1,11 @@
 .DS_Store
 __pycache__/
 config/.scope-cache/
-v2-data.md
-v3-data.md
-v3-simulation.md
+*.md
+!README.md
 results/scope_v3_*.json
+results/scope_v4_*.json
 Makefile.dep
 destiny
+scope_model
 obj/

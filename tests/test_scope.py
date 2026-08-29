@@ -247,6 +247,82 @@ class ScopeTests(unittest.TestCase):
         )
         self.assertGreater(larger_result.hit_rates[1], result.hit_rates[1])
 
+    def test_v4_cpp_trace_has_configured_mix_and_capacity_sensitive_l3(self) -> None:
+        base_layers = [
+            replace(layer("L1", 1.0, 0.1), capacity_bytes=32768,
+                    associativity=8),
+            replace(layer("L2", 1.0, 0.1), capacity_bytes=262144,
+                    associativity=8),
+            replace(layer("L3", 1.0, 0.1), capacity_bytes=1048576,
+                    associativity=16),
+        ]
+        hit_model = {
+            "mode": "cpp_openvla_trace",
+            "operator": "attention",
+            "sampled_working_set_bytes": 2097152,
+            "seed": 20260829,
+            "isa_access_bytes": 16,
+            "working_set_stride_bytes": 64,
+            "operator_shape": {
+                "sequence_tokens": 295,
+                "hidden_size": 4096,
+                "num_attention_heads": 32,
+                "head_dim": 128,
+                "tile_m": 16,
+                "tile_n": 64,
+                "tile_k": 32,
+            },
+        }
+        small = scope.estimate_hit_rates(
+            base_layers,
+            {"read_fraction": 0.75, "hit_rate_model": hit_model},
+            ROOT,
+        )
+        large = scope.estimate_hit_rates(
+            [base_layers[0], base_layers[1],
+             replace(base_layers[2], capacity_bytes=8388608)],
+            {"read_fraction": 0.75, "hit_rate_model": hit_model},
+            ROOT,
+        )
+        self.assertEqual(small.observed_read_fraction, 0.75)
+        self.assertEqual(large.observed_read_fraction, 0.75)
+        self.assertGreater(large.hit_rates[2], small.hit_rates[2])
+        self.assertEqual(large.trace_metadata["isa_access_bytes"], 16)
+
+    def test_v4_uses_orin_lpddr5_and_screened_search_space(self) -> None:
+        config = json.loads((ROOT / "config/scope_v4.json").read_text())
+        offchip = config["off_chip"]
+        self.assertEqual(offchip["standard"], "LPDDR5-6400")
+        self.assertEqual(offchip["bandwidth_gbps"], 204.8)
+        self.assertEqual(offchip["bus_width_bits"], 256)
+        self.assertAlmostEqual(
+            offchip["energy_pj_per_bit"] * offchip["transaction_bytes"] * 8 / 1000,
+            1.28,
+        )
+        self.assertEqual(
+            config["layers"][0]["devices"],
+            ["SRAM", "SOT-MRAM", "TFET-eDRAM"],
+        )
+        self.assertEqual(
+            config["layers"][0]["device_overrides"]["TFET-eDRAM"]
+                  ["peripheral_latency_ns"],
+            0.25,
+        )
+        self.assertIn("TFET-eDRAM", config["layers"][1]["devices"])
+        self.assertIn("OSFET-eDRAM", config["layers"][2]["devices"])
+        resolved = scope.select_workload(
+            scope.load_json(ROOT / "config/scope_v4.json"), "attention"
+        )
+        variants = scope.design_variants(
+            resolved, True, ROOT, self.library_v3
+        )
+        self.assertEqual(len(variants), 48)
+        tfet_l1 = next(
+            variant["layers"][0] for variant in variants
+            if variant["layers"][0]["device"] == "TFET-eDRAM"
+        )
+        self.assertEqual(tfet_l1["peripheral_latency_ns"], 0.25)
+
     def test_guidance_and_density_scaled_requested_mapping(self) -> None:
         report = {
             "average_latency_ns": 10.0,
