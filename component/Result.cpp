@@ -718,6 +718,40 @@ void Result::printAsCache(Result &tagResult, CacheAccessMode cacheAccessMode) {
 		default:	/* sequential */
 			cout << "Sequential" << endl;
 		}
+		/*
+		 * Machine-readable SCOPE fields.  These expose the selected data-array
+		 * geometry and RBL parasitics without changing DESTINY's optimization.
+		 * For eDRAM the RBL capacitance is exactly the metal contribution plus
+		 * the access-transistor drain parasitic accumulated in SubArray::Initialize.
+		 */
+		double rblCellCapacitance = bank->mat.subarray.capCellAccess
+				* bank->mat.subarray.numRow / 2;
+		double rblWireCapacitance = MAX(0.0,
+				bank->mat.subarray.capBitline - rblCellCapacitance);
+		double rblEnergy = bank->mat.subarray.capBitline
+				* bank->mat.subarray.senseVoltage * devtech->vdd * bank->blockSize;
+		cout << "SCOPE Selected Data Subarray Rows = "
+				<< bank->mat.subarray.numRow << endl;
+		cout << "SCOPE Selected Data Subarray Columns = "
+				<< bank->mat.subarray.numColumn << endl;
+		cout << "SCOPE Selected RBL Capacitance = "
+				<< bank->mat.subarray.capBitline * 1e15 << "fF" << endl;
+		cout << "SCOPE Selected RBL Wire Capacitance = "
+				<< rblWireCapacitance * 1e15 << "fF" << endl;
+		cout << "SCOPE Selected RBL Cell Capacitance = "
+				<< rblCellCapacitance * 1e15 << "fF" << endl;
+		cout << "SCOPE Selected RBL Length = "
+				<< bank->mat.subarray.lenBitline * 1e6 << "um" << endl;
+		cout << "SCOPE Selected RBL Delay = "
+				<< bank->mat.subarray.bitlineDelay * 1e9 << "ns" << endl;
+		cout << "SCOPE Selected RBL Read Energy = "
+				<< rblEnergy * 1e9 << "nJ" << endl;
+		cout << "SCOPE Selected Peripheral Read Latency = "
+				<< MAX(0.0, cacheHitLatency - bank->mat.subarray.bitlineDelay) * 1e9
+				<< "ns" << endl;
+		cout << "SCOPE Selected Peripheral Read Energy = "
+				<< MAX(0.0, cacheHitDynamicEnergy - rblEnergy) * 1e9
+				<< "nJ" << endl;
 		cout << "Area:" << endl;
 		cout << " - Total Area = " << cacheArea * 1e6 << "mm^2" << endl;
 		cout << " |--- Data Array Area = " << bank->height * 1e6 << "um x " << bank->width * 1e6 << "um = " << bank->area * 1e6 << "mm^2" << endl;

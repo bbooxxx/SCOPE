@@ -2,6 +2,9 @@
 __pycache__/
 config/.scope-cache/
 v2-data.md
+v3-data.md
+v3-simulation.md
+results/scope_v3_*.json
 Makefile.dep
 destiny
 obj/

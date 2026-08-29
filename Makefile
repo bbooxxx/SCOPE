@@ -18,10 +18,10 @@ LDLIBS :=
 OUTDIR := obj
 
 # construct list of .cpp and their corresponding .o and .d files
-SRC := $(wildcard *.cpp)
-INC := 
+SRC := main.cpp $(wildcard component/*.cpp)
+INC := -I. -Icomponent
 DBG :=
-OBJ := $(patsubst %.cpp,$(OUTDIR)/%.o,$(notdir $(SRC)))
+OBJ := $(OUTDIR)/main.o $(patsubst component/%.cpp,$(OUTDIR)/%.o,$(wildcard component/*.cpp))
 DEP := Makefile.dep
 
 # file disambiguity is achieved via the .PHONY directive
@@ -40,10 +40,10 @@ $(target): $(OBJ)
 	$(CXX) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 clean:
-	$(RM) $(target) $(dep_file) $(OBJ)
+	$(RM) $(target) $(DEP) $(OBJ)
 
 scope: all
-	python3 scope.py config/scope_v2.json --json-output results/scope_v2_attention.json
+	python3 scope.py config/scope_v3.json --json-output results/scope_v3.json
 
 scope-requested: all
 	python3 scope.py config/scope_v2_requested.json --json-output results/scope_v2_requested.json
@@ -51,7 +51,10 @@ scope-requested: all
 test-scope:
 	python3 -m unittest discover -s tests -v
 
-$(OUTDIR)/%.o: %.cpp
+$(OUTDIR)/main.o: main.cpp
+	$(CXX) $(CXXFLAGS) $(DBG) $(INC) -c $< -o $@
+
+$(OUTDIR)/%.o: component/%.cpp
 	$(CXX) $(CXXFLAGS) $(DBG) $(INC) -c $< -o $@
 
 depend $(DEP):

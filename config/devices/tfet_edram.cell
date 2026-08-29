@@ -13,10 +13,13 @@
 -ScopeDevice: TFET-eDRAM
 -ScopeReadLatency: Lr_s_Nrow
 -ScopeReadEnergy: Er_Nrow
+-ScopeReadIon: 33.1_uA_per_um
+-ScopeReadVdd: 1.2_V
+-ScopeReadDeltaV: 0.1_V
 -ScopeWriteLatency: 3_ns
 -ScopeWriteEnergy: ~10_fJ_per_bit
--ScopeLeakagePower: equal_to_Pref
--ScopeRefreshPower: ~100_aW_per_bit
+-ScopeLeakagePower: 0_in_v3_demo
+-ScopeRefreshPower: not_applicable_in_v3
 -ScopeEndurance: >1e15
 -ScopeVariation: low
 -ScopeDensity: ~35_F2_layout_XL

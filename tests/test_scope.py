@@ -65,6 +65,8 @@ class ScopeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         with (ROOT / "config/device_library.json").open(encoding="utf-8") as stream:
             cls.library = json.load(stream)["devices"]
+        with (ROOT / "config/device_library_v3.json").open(encoding="utf-8") as stream:
+            cls.library_v3 = json.load(stream)["devices"]
 
     def test_device_library_contains_all_screenshot_columns(self) -> None:
         self.assertEqual(
@@ -110,8 +112,8 @@ class ScopeTests(unittest.TestCase):
 
     def test_effective_static_power_does_not_reuse_raw_tag_leakage(self) -> None:
         raw = metrics(1.0, 0.1, leakage=250.0)
-        effective, device_leakage, _ = scope._apply_device_library(
-            raw, self.library["SOT-MRAM"], 4096, 64, 0.0
+        effective, device_leakage, _, _, _ = scope._apply_device_library(
+            raw, self.library["SOT-MRAM"], 4096, 64, 1, 0.0, 0.0
         )
         self.assertEqual(device_leakage, 0.0)
         self.assertEqual(effective.leakage_power_mw, 0.0)
@@ -122,6 +124,83 @@ class ScopeTests(unittest.TestCase):
         )
         self.assertEqual(edram_leakage, 0.0)
         self.assertGreater(edram_refresh, 0.0)
+
+    def test_v3_edram_read_uses_rbl_equation_and_requested_pure_paths(self) -> None:
+        raw = replace(
+            metrics(1.0, 0.1),
+            subarray_rows=256,
+            subarray_columns=512,
+            rbl_capacitance_ff=40.0,
+            rbl_wire_capacitance_ff=30.0,
+            rbl_cell_capacitance_ff=10.0,
+            peripheral_read_latency_ns=0.5,
+            peripheral_read_energy_nj=0.01,
+        )
+        effective, _, _, read, refresh = scope._apply_device_library(
+            raw, self.library_v3["Si-eDRAM"], 4096, 64, 1, 10.0, 10.0
+        )
+        self.assertAlmostEqual(read["cell_read_latency_ns"], 40e-15 * 0.1 / 33.1e-6 * 1e9)
+        self.assertAlmostEqual(read["read_energy_fj_per_bit"], 4.6)
+        self.assertAlmostEqual(effective.hit_latency_ns,
+                               read["cell_read_latency_ns"] + 0.5)
+        self.assertTrue(refresh["enabled"])
+        self.assertEqual(self.library_v3["2D-eDRAM"]["read_latency"]["selected_path"],
+                         "pure")
+        self.assertEqual(self.library_v3["OSFET-eDRAM"]["read_latency"]["selected_path"],
+                         "pure")
+        self.assertEqual(self.library_v3["2D-eDRAM"]["read_circuit"]["path"],
+                         "pure 2D-FET (d)")
+        self.assertEqual(self.library_v3["OSFET-eDRAM"]["read_circuit"]["path"],
+                         "pure a-IGZO OSFET (o)")
+
+    def test_si_refresh_can_consume_more_than_all_bank_bandwidth(self) -> None:
+        result = scope.evaluate_si_refresh(
+            capacity_bytes=32 * 1024 * 1024,
+            banks=4,
+            nrow=256,
+            ncolumn=512,
+            read_energy_fj_per_bit=4.6,
+            write_energy_fj_per_bit=2.5,
+            read_latency_ns=0.62,
+            write_latency_ns=2.0,
+            refresh_interval_us=10.0,
+            retention_time_us=10.0,
+        )
+        self.assertGreater(result.bandwidth_occupancy, 1.0)
+        self.assertFalse(result.schedulable)
+        half_busy = replace(layer("L1", 1.0, 0.1), refresh={
+            "enabled": True, "bandwidth_occupancy": 0.5,
+        })
+        self.assertEqual(scope.ScopeModel._refresh_adjusted_latency(half_busy, 2.0),
+                         4.0)
+
+    def test_openvla_trace_derives_rho_from_attention_and_ffn_events(self) -> None:
+        config = json.loads((ROOT / "config/scope_v3.json").read_text())
+        attention = scope.build_trace(
+            config["workloads"]["attention"]["hit_rate_model"], 64
+        )
+        ffn = scope.build_trace(config["workloads"]["ffn"]["hit_rate_model"], 64)
+        self.assertEqual(attention.reads + attention.writes, len(attention.events))
+        self.assertEqual(ffn.reads + ffn.writes, len(ffn.events))
+        self.assertAlmostEqual(attention.read_fraction,
+                               attention.reads / len(attention.events))
+        self.assertAlmostEqual(ffn.read_fraction, ffn.reads / len(ffn.events))
+        self.assertGreater(attention.read_fraction, 0.5)
+        self.assertGreater(ffn.read_fraction, 0.5)
+        self.assertFalse(attention.metadata["hardware_trace_available"])
+
+    def test_osfet_endurance_is_not_limiting_in_v3(self) -> None:
+        endurance = self.library_v3["OSFET-eDRAM"]["endurance"]
+        self.assertEqual(endurance["model"], "not_limiting")
+        self.assertEqual(endurance["writes_per_line"], 1e30)
+        for stem in ("2d_edram", "osfet_edram"):
+            for suffix in ("cfg", "cell"):
+                text = (ROOT / f"config/devices/{stem}.{suffix}").read_text()
+                self.assertIn("-ScopeSelectedReadPath: pure", text)
+        for stem in ("tfet_edram", "2d_edram", "osfet_edram"):
+            for suffix in ("cfg", "cell"):
+                text = (ROOT / f"config/devices/{stem}.{suffix}").read_text()
+                self.assertIn("-ScopeRefreshPower: not_applicable_in_v3", text)
 
     def test_operator_hit_rates_are_capacity_aware_and_reasonable(self) -> None:
         layers = [
