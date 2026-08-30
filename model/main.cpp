@@ -73,6 +73,15 @@ void print_array(const std::vector<std::uint64_t>& values) {
     std::cout << "]";
 }
 
+std::string tensor_name(std::uint64_t address) {
+    if (address < 0x200000000ULL) return "activation/Q";
+    if (address < 0x400000000ULL) return "weight/K";
+    if (address < 0x600000000ULL) return "weight/V-or-FFN";
+    if (address < 0x700000000ULL) return "output";
+    if (address < 0x800000000ULL) return "FFN-state";
+    return "cold-stream";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -96,13 +105,15 @@ int main(int argc, char** argv) {
         trace_config.sampled_working_set_bytes = number<std::uint64_t>(
             args, "sampled-working-set-bytes",
             trace_config.sampled_working_set_bytes);
+        trace_config.cycle_access_cap = number<std::uint64_t>(
+            args, "cycle-access-cap", trace_config.cycle_access_cap);
         trace_config.access_bytes = number<std::size_t>(
             args, "access-bytes", trace_config.access_bytes);
         trace_config.working_set_stride_bytes = number<std::size_t>(
             args, "working-set-stride-bytes",
             trace_config.working_set_stride_bytes);
-        trace_config.read_fraction = number<double>(
-            args, "read-fraction", trace_config.read_fraction);
+        trace_config.bytes_per_element = number<std::size_t>(
+            args, "bytes-per-element", trace_config.bytes_per_element);
         trace_config.seed = number<std::uint64_t>(args, "seed", trace_config.seed);
 
         const std::size_t line_bytes = number<std::size_t>(args, "line-bytes", 64);
@@ -136,6 +147,8 @@ int main(int argc, char** argv) {
         std::vector<double> writebacks;
         std::vector<std::uint64_t> accesses;
         std::vector<std::uint64_t> hits;
+        std::vector<std::uint64_t> compulsory_misses;
+        std::vector<std::uint64_t> noncompulsory_misses;
         for (const auto& level : result.levels) {
             hit_rates.push_back(level.accesses
                                     ? static_cast<double>(level.hits) / level.accesses
@@ -144,10 +157,12 @@ int main(int argc, char** argv) {
                 static_cast<double>(level.writebacks) / result.measured_requests);
             accesses.push_back(level.accesses);
             hits.push_back(level.hits);
+            compulsory_misses.push_back(level.compulsory_misses);
+            noncompulsory_misses.push_back(level.noncompulsory_misses);
         }
 
         std::cout << std::setprecision(15);
-        std::cout << "{\"schema_version\":4"
+        std::cout << "{\"schema_version\":5"
                   << ",\"model\":\"set_associative_trace\""
                   << ",\"operator\":\"" << trace_config.operator_name << "\""
                   << ",\"kernel\":\""
@@ -158,13 +173,20 @@ int main(int argc, char** argv) {
                   << ",\"isa_access_bytes\":" << trace_config.access_bytes
                   << ",\"working_set_stride_bytes\":"
                   << trace_config.working_set_stride_bytes
-                  << ",\"read_fraction_target\":" << trace_config.read_fraction
+                  << ",\"bytes_per_element\":" << trace_config.bytes_per_element
+                  << ",\"analytical_loads\":" << trace.analytical_loads()
+                  << ",\"analytical_stores\":" << trace.analytical_stores()
+                  << ",\"analytical_working_set_bytes\":"
+                  << trace.analytical_working_set_bytes()
+                  << ",\"analytical_read_fraction\":"
+                  << trace.analytical_read_fraction()
                   << ",\"observed_read_fraction\":"
                   << static_cast<double>(result.measured_loads) /
                          result.measured_requests
                   << ",\"warmup_accesses\":" << warmup
                   << ",\"sample_accesses\":" << samples
                   << ",\"trace_cycle_accesses\":" << trace.cycle_accesses()
+                  << ",\"cycle_access_cap\":" << trace_config.cycle_access_cap
                   << ",\"sampled_tensor_bytes\":" << trace.sampled_tensor_bytes()
                   << ",\"cold_stream_fraction\":0.015625"
                   << ",\"seed\":" << trace_config.seed
@@ -174,11 +196,24 @@ int main(int argc, char** argv) {
         print_array(accesses);
         std::cout << ",\"hits\":";
         print_array(hits);
+        std::cout << ",\"compulsory_misses\":";
+        print_array(compulsory_misses);
+        std::cout << ",\"noncompulsory_misses\":";
+        print_array(noncompulsory_misses);
         std::cout << ",\"writebacks_per_request\":";
         print_array(writebacks);
         std::cout << ",\"offchip_writebacks_per_request\":"
                   << static_cast<double>(result.offchip_writebacks) /
                          result.measured_requests
+                  << ",\"representative_access\":{\"operation\":\""
+                  << (result.representative.operation == scope_model::Operation::kLoad
+                          ? "load" : "store")
+                  << "\",\"address\":" << result.representative.address
+                  << ",\"size_bytes\":" << result.representative.size_bytes
+                  << ",\"tensor\":\""
+                  << tensor_name(result.representative.address)
+                  << "\",\"hit_level\":\""
+                  << result.representative.hit_level << "\"}"
                   << ",\"operator_shape\":{\"sequence_tokens\":"
                   << trace_config.sequence_tokens
                   << ",\"hidden_size\":" << trace_config.hidden_size

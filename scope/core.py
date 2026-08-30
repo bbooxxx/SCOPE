@@ -26,7 +26,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from .edram import RefreshResult, evaluate_read, evaluate_si_refresh, no_refresh
+from .m3d import evaluate_m3d
 from .openvla_trace import build_trace, repeated
+from .sense_amp import evaluate_sense_amp
 
 
 FLOAT_RE = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
@@ -91,6 +93,24 @@ class DestinyMetrics:
     rbl_read_energy_nj: float = 0.0
     peripheral_read_latency_ns: float = 0.0
     peripheral_read_energy_nj: float = 0.0
+    data_array_area_mm2: float = 0.0
+    native_sense_amp_type: str = ""
+    sense_amp_count: int = 0
+    sense_amp_latency_ns: float = 0.0
+    sense_amp_read_energy_nj: float = 0.0
+    sense_amp_leakage_mw: float = 0.0
+    legacy_iv_converter_latency_ns: float = 0.0
+    legacy_iv_converter_read_energy_nj: float = 0.0
+    legacy_iv_converter_leakage_mw: float = 0.0
+    tag_lookup_latency_ns: float = 0.0
+    tag_lookup_energy_nj: float = 0.0
+    data_bank_latency_ns: float = 0.0
+    data_routing_latency_ns: float = 0.0
+    data_predecoder_latency_ns: float = 0.0
+    data_row_decoder_latency_ns: float = 0.0
+    data_mux_latency_ns: float = 0.0
+    data_precharge_latency_ns: float = 0.0
+    tag_comparator_latency_ns: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -100,6 +120,7 @@ class LayerSpec:
     device_family: str
     destiny_config: Path
     capacity_bytes: int
+    destiny_model_capacity_bytes: int
     associativity: int
     line_bytes: int
     replacement_policy: str
@@ -125,6 +146,9 @@ class LayerSpec:
     metrics: DestinyMetrics
     edram_read: Optional[Dict[str, Any]] = None
     refresh: Optional[Dict[str, Any]] = None
+    sense_amp: Optional[Dict[str, Any]] = None
+    m3d: Optional[Dict[str, Any]] = None
+    static_power_components: Optional[Dict[str, float]] = None
 
     @property
     def lines(self) -> int:
@@ -242,7 +266,6 @@ _CPP_HIT_RATE_CACHE: Dict[Tuple[Any, ...], HitRateResult] = {}
 
 def _cpp_openvla_hit_rates(
     layers: Sequence[LayerSpec], model: Dict[str, Any], repo_root: Path,
-    read_fraction: float,
 ) -> HitRateResult:
     binary = _resolve_path(
         repo_root, str(model.get("binary", "scope_model"))
@@ -271,11 +294,13 @@ def _cpp_openvla_hit_rates(
     sample_accesses = int(model.get("sample_accesses", 0))
     seed = int(model.get("seed", 7))
     access_bytes = int(model.get("isa_access_bytes", 16))
+    bytes_per_element = int(model.get("bytes_per_element", 2))
     stride_bytes = int(model.get("working_set_stride_bytes", line_bytes))
+    cycle_access_cap = int(model.get("trace_cycle_accesses", 0))
     key = (
         operator, capacities, associativities, policies, line_bytes,
         sampled_working_set_bytes, warmup_accesses, sample_accesses,
-        seed, access_bytes, stride_bytes, read_fraction,
+        seed, access_bytes, bytes_per_element, stride_bytes, cycle_access_cap,
         tuple(sorted((str(key), int(value)) for key, value in shape.items())),
     )
     cached = _CPP_HIT_RATE_CACHE.get(key)
@@ -291,8 +316,9 @@ def _cpp_openvla_hit_rates(
         "--line-bytes", str(line_bytes),
         "--sampled-working-set-bytes", str(sampled_working_set_bytes),
         "--access-bytes", str(access_bytes),
+        "--bytes-per-element", str(bytes_per_element),
         "--working-set-stride-bytes", str(stride_bytes),
-        "--read-fraction", str(read_fraction),
+        "--cycle-access-cap", str(cycle_access_cap),
         "--seed", str(seed),
         "--sequence-tokens", str(shape["sequence_tokens"]),
         "--hidden-size", str(shape["hidden_size"]),
@@ -518,6 +544,60 @@ class DestinyRunner:
             peripheral_read_energy_nj=DestinyRunner._number(
                 text, "SCOPE Selected Peripheral Read Energy", optional=True
             ),
+            data_array_area_mm2=DestinyRunner._number(
+                text, "SCOPE Selected Data Array Area", optional=True
+            ),
+            native_sense_amp_type=detail(
+                r"^SCOPE Selected Native Sense Amplifier Type\s*=\s*(.+)$"
+            ),
+            sense_amp_count=int(DestinyRunner._number(
+                text, "SCOPE Selected Sense Amplifier Count", optional=True
+            )),
+            sense_amp_latency_ns=DestinyRunner._number(
+                text, "SCOPE Selected Sense Amplifier Latency", optional=True
+            ),
+            sense_amp_read_energy_nj=DestinyRunner._number(
+                text, "SCOPE Selected Sense Amplifier Read Energy", optional=True
+            ),
+            sense_amp_leakage_mw=DestinyRunner._number(
+                text, "SCOPE Selected Sense Amplifier Leakage", optional=True
+            ),
+            legacy_iv_converter_latency_ns=DestinyRunner._number(
+                text, "SCOPE Selected Legacy IV Converter Latency", optional=True
+            ),
+            legacy_iv_converter_read_energy_nj=DestinyRunner._number(
+                text, "SCOPE Selected Legacy IV Converter Read Energy", optional=True
+            ),
+            legacy_iv_converter_leakage_mw=DestinyRunner._number(
+                text, "SCOPE Selected Legacy IV Converter Leakage", optional=True
+            ),
+            tag_lookup_latency_ns=DestinyRunner._number(
+                text, "SCOPE Selected Tag Lookup Latency", optional=True
+            ),
+            tag_lookup_energy_nj=DestinyRunner._number(
+                text, "SCOPE Selected Tag Lookup Energy", optional=True
+            ),
+            data_bank_latency_ns=DestinyRunner._number(
+                text, "SCOPE Selected Data Bank Latency", optional=True
+            ),
+            data_routing_latency_ns=DestinyRunner._number(
+                text, "SCOPE Selected Data Routing Latency", optional=True
+            ),
+            data_predecoder_latency_ns=DestinyRunner._number(
+                text, "SCOPE Selected Data Predecoder Latency", optional=True
+            ),
+            data_row_decoder_latency_ns=DestinyRunner._number(
+                text, "SCOPE Selected Data Row Decoder Latency", optional=True
+            ),
+            data_mux_latency_ns=DestinyRunner._number(
+                text, "SCOPE Selected Data Mux Latency", optional=True
+            ),
+            data_precharge_latency_ns=DestinyRunner._number(
+                text, "SCOPE Selected Data Precharge Latency", optional=True
+            ),
+            tag_comparator_latency_ns=DestinyRunner._number(
+                text, "SCOPE Selected Tag Comparator Latency", optional=True
+            ),
         )
 
 
@@ -700,7 +780,8 @@ def _apply_device_library(
 
 def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Path,
                 global_ber_max: float,
-                device_library: Dict[str, Dict[str, Any]]) -> LayerSpec:
+                device_library: Dict[str, Dict[str, Any]],
+                model_library: Optional[Dict[str, Any]] = None) -> LayerSpec:
     name = str(raw["name"])
     device = str(raw["device"])
     require(device in device_library,
@@ -716,8 +797,11 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
     capacity_bytes = int(raw["capacity_bytes"])
     associativity = int(raw["associativity"])
     line_bytes = int(raw["line_bytes"])
-    require(capacity_bytes == raw_metrics.capacity_bytes,
-            f"{name}: JSON capacity {capacity_bytes} differs from DESTINY "
+    destiny_model_capacity_bytes = int(
+        raw.get("destiny_model_capacity_bytes", capacity_bytes)
+    )
+    require(destiny_model_capacity_bytes == raw_metrics.capacity_bytes,
+            f"{name}: circuit proxy capacity {destiny_model_capacity_bytes} differs from DESTINY "
             f"capacity {raw_metrics.capacity_bytes}")
     require(associativity == raw_metrics.associativity,
             f"{name}: JSON associativity {associativity} differs from DESTINY "
@@ -758,6 +842,74 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
     has_density_divisor = "density_divisor" in entry
     stacked_tiers = int(raw.get("stacked_tiers", 4 if has_density_divisor else 1))
     require(stacked_tiers > 0, f"{name}: stacked_tiers must be positive")
+    models = model_library or {}
+    sense_amp_result: Optional[Dict[str, Any]] = None
+    m3d_result: Optional[Dict[str, Any]] = None
+    static_components = {"data_cells_mw": device_leakage_mw}
+    effective_values = asdict(effective_metrics)
+    if "sense_amplifier" in entry and "sense_amplifier_models" in models:
+        try:
+            evaluated_sa = evaluate_sense_amp(
+                raw_metrics,
+                entry,
+                dict(models["sense_amplifier_models"]),
+                raw.get("sense_amp_type"),
+            )
+        except ValueError as exc:
+            raise ScopeError(f"{name}: {exc}") from exc
+        sense_amp_result = evaluated_sa.to_dict()
+        effective_values["hit_latency_ns"] = max(
+            0.0,
+            float(effective_values["hit_latency_ns"])
+            + evaluated_sa.hit_latency_delta_ns,
+        )
+        effective_values["hit_energy_nj"] = max(
+            0.0,
+            float(effective_values["hit_energy_nj"])
+            + evaluated_sa.hit_energy_delta_nj,
+        )
+        static_components["sense_amplifiers_mw"] = \
+            evaluated_sa.selected_leakage_mw
+
+    m3d_cfg = raw.get("m3d", {})
+    if m3d_cfg or models.get("m3d_defaults"):
+        try:
+            evaluated_m3d = evaluate_m3d(
+                dict(m3d_cfg),
+                dict(models.get("m3d_defaults", {})),
+                banks=banks,
+                line_bits=line_bytes * 8,
+                data_array_area_mm2=(
+                    raw_metrics.data_array_area_mm2
+                    * capacity_bytes / destiny_model_capacity_bytes
+                ),
+            )
+        except (KeyError, ValueError) as exc:
+            raise ScopeError(f"{name}: invalid M3D configuration: {exc}") from exc
+        m3d_result = evaluated_m3d.to_dict()
+        if evaluated_m3d.enabled:
+            effective_values["hit_latency_ns"] += evaluated_m3d.latency_penalty_ns
+            effective_values["write_latency_ns"] += evaluated_m3d.latency_penalty_ns
+            effective_values["hit_energy_nj"] += evaluated_m3d.energy_penalty_nj
+            effective_values["write_energy_nj"] += evaluated_m3d.energy_penalty_nj
+
+    if models:
+        address_bits = int(models.get("tag_address_bits", 49))
+        state_bits = int(models.get("tag_state_bits_per_line", 2))
+        tag_leak_pw = float(models.get("tag_sram_leakage_pw_per_bit", 27.5))
+        sets = capacity_bytes // (line_bytes * associativity)
+        index_bits = int(math.ceil(math.log2(max(1, sets))))
+        offset_bits = int(math.log2(line_bytes))
+        tag_bits_per_line = max(1, address_bits - index_bits - offset_bits + state_bits)
+        tag_bits = (capacity_bytes // line_bytes) * tag_bits_per_line
+        static_components["sram_tag_array_mw"] = tag_bits * tag_leak_pw * 1e-9
+    static_total = sum(static_components.values())
+    effective_values.update(
+        leakage_power_mw=static_total,
+        data_array_leakage_power_mw=device_leakage_mw,
+        tag_array_leakage_power_mw=static_components.get("sram_tag_array_mw", 0.0),
+    )
+    effective_metrics = DestinyMetrics(**effective_values)
     effective_density_f2 = float(entry["density_f2"])
     if has_density_divisor:
         effective_density_f2 /= stacked_tiers
@@ -767,6 +919,7 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
         device_family=device_family,
         destiny_config=destiny_config,
         capacity_bytes=capacity_bytes,
+        destiny_model_capacity_bytes=destiny_model_capacity_bytes,
         associativity=associativity,
         line_bytes=line_bytes,
         replacement_policy=policy,
@@ -794,6 +947,9 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
         metrics=effective_metrics,
         edram_read=edram_read,
         refresh=refresh_result,
+        sense_amp=sense_amp_result,
+        m3d=m3d_result,
+        static_power_components=static_components,
     )
 
 
@@ -814,6 +970,33 @@ def build_crossbar(raw: Dict[str, Any]) -> CrossbarSpec:
     require(spec.transaction_bits > 0,
             f"{spec.name}: transaction_bits must be positive")
     return spec
+
+
+def geometry_audit(layer: LayerSpec) -> Dict[str, Any]:
+    def dimensions(text: str) -> List[int]:
+        return [int(value) for value in re.findall(r"\d+", text)]
+
+    bank = dimensions(layer.raw_metrics.bank_organization)
+    mat = dimensions(layer.raw_metrics.mat_organization)
+    subarray = [layer.raw_metrics.subarray_rows,
+                layer.raw_metrics.subarray_columns]
+    factors = [value for value in bank + mat + subarray if value > 0]
+    reconstructed = math.prod(factors) if factors else 0
+    expected = layer.capacity_bytes * 8
+    return {
+        "bank_dimensions": bank,
+        "mat_dimensions": mat,
+        "subarray_dimensions": subarray,
+        "reconstructed_physical_bits": reconstructed,
+        "configured_capacity_bits": expected,
+        "capacity_reconstruction_ratio": reconstructed / expected if expected else 0.0,
+        "interpretation": (
+            "bank dimensions count mats; mat dimensions count subarrays per mat; "
+            "only subarray dimensions are physical cell rows/columns. A small mat "
+            "count shortens local word/bit lines while the bank-level mat count "
+            "reconstructs the full capacity."
+        ),
+    }
 
 
 def _parse_address(value: Any) -> int:
@@ -865,11 +1048,11 @@ def estimate_hit_rates(layers: Sequence[LayerSpec], workload: Dict[str, Any],
                        repo_root: Path) -> HitRateResult:
     model = dict(workload.get("hit_rate_model", {}))
     mode = str(model.get("mode", "synthetic")).lower()
+    if mode == "cpp_openvla_trace":
+        return _cpp_openvla_hit_rates(layers, model, repo_root)
+
     read_fraction = float(workload.get("read_fraction", 0.5))
     require(0.0 <= read_fraction <= 1.0, "read_fraction must be in [0, 1]")
-
-    if mode == "cpp_openvla_trace":
-        return _cpp_openvla_hit_rates(layers, model, repo_root, read_fraction)
 
     if mode == "fixed":
         rates = tuple(float(item["hit_rate"]) for item in workload["fixed_hit_rates"])
@@ -1367,6 +1550,119 @@ class ScopeModel:
                 })
         return results
 
+    @staticmethod
+    def _scaled_path(
+        layer: LayerSpec, total_latency_ns: float, total_energy_nj: float,
+        kind: str,
+    ) -> List[Dict[str, Any]]:
+        raw = layer.raw_metrics
+        if kind == "tag":
+            latency_weights = [
+                max(0.0, raw.tag_lookup_latency_ns - raw.tag_comparator_latency_ns),
+                max(0.0, raw.tag_comparator_latency_ns),
+            ]
+            energy_weights = [0.75 * raw.tag_lookup_energy_nj,
+                              0.25 * raw.tag_lookup_energy_nj]
+            labels = [
+                f"{layer.name} tag decoder + tag SRAM",
+                f"{layer.name} tag comparator",
+            ]
+        elif kind == "write":
+            m3d = layer.m3d or {}
+            latency_weights = [
+                max(0.0, raw.tag_lookup_latency_ns),
+                max(0.0, raw.data_routing_latency_ns),
+                max(0.0, raw.data_predecoder_latency_ns
+                    + raw.data_row_decoder_latency_ns),
+                max(0.0, raw.write_latency_ns - raw.tag_lookup_latency_ns),
+                max(0.0, float(m3d.get("latency_penalty_ns", 0.0))),
+            ]
+            energy_weights = [
+                max(0.0, raw.tag_lookup_energy_nj),
+                max(0.0, raw.write_energy_nj * 0.10),
+                max(0.0, raw.write_energy_nj * 0.15),
+                max(0.0, raw.write_energy_nj * 0.75),
+                max(0.0, float(m3d.get("energy_penalty_nj", 0.0))),
+            ]
+            labels = [
+                f"{layer.name} tag lookup + comparator",
+                f"{layer.name} bank routing",
+                f"{layer.name} predecoder + row decoder/wordline",
+                f"{layer.name} cell write + bitline restore",
+                f"{layer.name} M3D vertical links",
+            ]
+        else:
+            sa = layer.sense_amp or {}
+            m3d = layer.m3d or {}
+            edram = layer.edram_read or {}
+            selected_sa = str(sa.get("selected_type", raw.native_sense_amp_type
+                                     or "voltage"))
+            cell_latency = float(edram.get(
+                "cell_read_latency_ns", raw.rbl_delay_ns
+            ))
+            latency_weights = [
+                max(0.0, raw.tag_lookup_latency_ns
+                    - raw.tag_comparator_latency_ns),
+                max(0.0, raw.tag_comparator_latency_ns),
+                max(0.0, raw.data_routing_latency_ns),
+                max(0.0, raw.data_predecoder_latency_ns
+                    + raw.data_row_decoder_latency_ns),
+                max(0.0, cell_latency),
+                max(0.0, float(sa.get(
+                    "selected_latency_ns", raw.sense_amp_latency_ns
+                ))),
+                max(0.0, raw.data_mux_latency_ns + raw.data_precharge_latency_ns),
+                max(0.0, float(m3d.get("latency_penalty_ns", 0.0))),
+            ]
+            peripheral_energy = max(
+                0.0, raw.peripheral_read_energy_nj
+                - raw.sense_amp_read_energy_nj
+            )
+            energy_weights = [
+                max(0.0, 0.75 * raw.tag_lookup_energy_nj),
+                max(0.0, 0.25 * raw.tag_lookup_energy_nj),
+                0.20 * peripheral_energy,
+                0.25 * peripheral_energy,
+                max(0.0, raw.rbl_read_energy_nj),
+                max(0.0, float(sa.get(
+                    "selected_energy_nj", raw.sense_amp_read_energy_nj
+                ))),
+                0.55 * peripheral_energy,
+                max(0.0, float(m3d.get("energy_penalty_nj", 0.0))),
+            ]
+            labels = [
+                f"{layer.name} tag decoder + tag SRAM",
+                f"{layer.name} tag comparator",
+                f"{layer.name} bank routing",
+                f"{layer.name} predecoder + row decoder/wordline",
+                f"{layer.name} cell discharge + RBL",
+                f"{layer.name} {selected_sa} sense amplifier",
+                f"{layer.name} column mux + precharge/output",
+                f"{layer.name} M3D vertical links",
+            ]
+
+        latency_sum = sum(latency_weights)
+        energy_sum = sum(energy_weights)
+        if latency_sum <= 0.0:
+            latency_weights = [1.0] * len(labels)
+            latency_sum = float(len(labels))
+        if energy_sum <= 0.0:
+            energy_weights = [1.0] * len(labels)
+            energy_sum = float(len(labels))
+        return [
+            {
+                "component": label,
+                "latency_ns": total_latency_ns * latency / latency_sum,
+                "energy_nj": total_energy_nj * energy / energy_sum,
+                "raw_model_latency_weight_ns": latency,
+                "raw_model_energy_weight_nj": energy,
+            }
+            for label, latency, energy in zip(
+                labels, latency_weights, energy_weights
+            )
+            if latency > 0.0 or energy > 0.0
+        ]
+
     def instruction(self, op: str, hit_level: str) -> Dict[str, Any]:
         op = op.lower()
         hit_level = hit_level.upper()
@@ -1392,20 +1688,30 @@ class ScopeModel:
                 "on_critical_path": critical,
             })
 
+        def add_path(layer: LayerSpec, kind: str, latency_ns: float,
+                     energy_nj: float, critical: bool = True) -> None:
+            for item in self._scaled_path(layer, latency_ns, energy_nj, kind):
+                add(item["component"], item["latency_ns"], item["energy_nj"],
+                    critical=critical)
+                breakdown[-1]["raw_model_latency_weight_ns"] = \
+                    item["raw_model_latency_weight_ns"]
+                breakdown[-1]["raw_model_energy_weight_nj"] = \
+                    item["raw_model_energy_weight_nj"]
+
         if self.core_to_l1_latency_ns:
             add("core->L1", self.core_to_l1_latency_ns, 0.0)
 
         if op == "store" and target == 0:
             layer = self.layers[0]
-            add("L1 store hit", self._refresh_adjusted_latency(
-                    layer, layer.metrics.write_latency_ns),
+            add_path(layer, "write", self._refresh_adjusted_latency(
+                layer, layer.metrics.write_latency_ns),
                 layer.metrics.write_energy_nj)
         else:
             missed = list(range(min(target, len(self.layers))))
             for index in missed:
                 layer = self.layers[index]
-                add(f"{layer.name} tag miss", self._refresh_adjusted_latency(
-                        layer, layer.metrics.miss_latency_ns),
+                add_path(layer, "tag", self._refresh_adjusted_latency(
+                    layer, layer.metrics.miss_latency_ns),
                     layer.metrics.miss_energy_nj)
                 if index < len(self.crossbars):
                     link = self.crossbars[index]
@@ -1413,8 +1719,8 @@ class ScopeModel:
 
             if target < len(self.layers):
                 layer = self.layers[target]
-                add(f"{layer.name} read hit", self._refresh_adjusted_latency(
-                        layer, layer.metrics.hit_latency_ns),
+                add_path(layer, "read", self._refresh_adjusted_latency(
+                    layer, layer.metrics.hit_latency_ns),
                     layer.metrics.hit_energy_nj)
             else:
                 add("off-chip read", self.offchip.latency_ns, self.offchip.energy_nj)
@@ -1425,8 +1731,8 @@ class ScopeModel:
                 critical = self.refill_on_critical_path or store_commit
                 label = f"{layer.name} allocate + store" if store_commit else \
                         f"{layer.name} refill"
-                add(label, self._refresh_adjusted_latency(
-                        layer, layer.metrics.write_latency_ns),
+                add_path(layer, "write", self._refresh_adjusted_latency(
+                    layer, layer.metrics.write_latency_ns),
                     layer.metrics.write_energy_nj, critical=critical)
 
         latency_ns = sum(item["latency_ns"] for item in breakdown)
@@ -1613,7 +1919,8 @@ def _generate_destiny_config(
         text, "-MemoryCellInputFile", f"../devices/{cell_match.group(1)}"
     )
     text = _set_config_field(
-        text, "-Capacity (KB)", int(layer["capacity_bytes"]) // 1024
+        text, "-Capacity (KB)",
+        int(layer.get("destiny_model_capacity_bytes", layer["capacity_bytes"])) // 1024
     )
     text = _set_config_field(
         text, "-Associativity (for cache only)", int(layer["associativity"])
@@ -1624,13 +1931,16 @@ def _generate_destiny_config(
     text = _set_config_field(text, "-OptimizationTarget", target)
     text = _set_config_field(text, "-PrintLevel", 1)
     text = _set_config_field(
-        text, "-StackedDieCount", int(layer.get("stacked_tiers", 1))
+        text, "-StackedDieCount",
+        1 if bool(layer.get("m3d", {}).get("enabled", False))
+        else int(layer.get("stacked_tiers", 1))
     )
     generated_dir = repo_root / "config" / ".scope-cache"
     generated_dir.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^a-z0-9]+", "_", str(layer["device"]).lower()).strip("_")
     filename = (
-        f"{str(layer['name']).lower()}_{slug}_{int(layer['capacity_bytes']) // 1024}k_"
+        f"{str(layer['name']).lower()}_{slug}_"
+        f"{int(layer.get('destiny_model_capacity_bytes', layer['capacity_bytes'])) // 1024}k_"
         f"{int(layer['associativity'])}w_{target.lower()}.cfg"
     )
     output = generated_dir / filename
@@ -1691,7 +2001,8 @@ def design_variants(
     require(isinstance(all_devices, list) and all_devices,
             "auto_selection.devices must be a non-empty list")
     target = _guided_destiny_target(
-        raw.get("guidance", {}), float(raw["workload"]["read_fraction"])
+        raw.get("guidance", {}),
+        float(raw["workload"].get("read_fraction_hint", 0.8)),
     )
     choices: List[List[Dict[str, Any]]] = []
     for layer in layers:
@@ -1734,6 +2045,13 @@ def design_variants(
                 )
                 merged["stacked_tiers"] = stacked_tiers
                 merged["capacity_bytes"] = capacity
+                if bool(raw.get("capacity", {}).get(
+                    "destiny_proxy_power_of_two", False
+                )) and capacity & (capacity - 1):
+                    merged["destiny_model_capacity_bytes"] = \
+                        1 << int(round(math.log2(capacity)))
+                else:
+                    merged["destiny_model_capacity_bytes"] = capacity
                 merged["sram_baseline_capacity_bytes"] = baseline
                 merged["density_capacity_scale"] = scale
                 merged["ideal_density_capacity_bytes"] = ideal_capacity
@@ -1757,7 +2075,23 @@ def design_variants(
                 )
                 merged["destiny_config"] = str(generated.relative_to(repo_root))
                 merged["destiny_optimization_target"] = target
-            expanded.append(merged)
+            entry = device_library[str(merged["device"])]
+            interface = entry.get("sense_amplifier", {})
+            default_sa = str(interface.get(
+                "default_type", interface.get("destiny_native_type", "voltage")
+            ))
+            if explore and interface:
+                sa_choices = merged.get(
+                    "sense_amp_types", interface.get("supported_types", [default_sa])
+                )
+            else:
+                sa_choices = [merged.get("sense_amp_type", default_sa)]
+            require(isinstance(sa_choices, list) and sa_choices,
+                    f"{merged['name']}: sense_amp_types must be non-empty")
+            for sense_amp_type in sa_choices:
+                sa_variant = copy.deepcopy(merged)
+                sa_variant["sense_amp_type"] = str(sense_amp_type)
+                expanded.append(sa_variant)
         choices.append(expanded)
 
     variants: List[Dict[str, Any]] = []
@@ -1770,7 +2104,9 @@ def design_variants(
 
 def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
                     auto_build: bool,
-                    device_library: Dict[str, Dict[str, Any]]) -> Tuple[ScopeModel, Dict[str, Any]]:
+                    device_library: Dict[str, Dict[str, Any]],
+                    model_library: Optional[Dict[str, Any]] = None
+                    ) -> Tuple[ScopeModel, Dict[str, Any]]:
     runner.ensure_built(auto_build=auto_build)
     global_ber_max = float(raw.get("constraints", {}).get("ber_max", 1.0))
     layer_specs: List[LayerSpec] = []
@@ -1778,7 +2114,8 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
         cfg_path = _resolve_path(repo_root, str(layer_raw["destiny_config"]))
         metrics = runner.run(cfg_path)
         layer_specs.append(build_layer(
-            layer_raw, metrics, repo_root, global_ber_max, device_library
+            layer_raw, metrics, repo_root, global_ber_max, device_library,
+            model_library,
         ))
     require([layer.name for layer in layer_specs] == ["L1", "L2", "L3"],
             "layers must be ordered and named L1, L2, L3")
@@ -1843,6 +2180,7 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
             "device_family": layer.device_family,
             "destiny_config": str(layer.destiny_config.relative_to(repo_root)),
             "capacity_bytes": layer.capacity_bytes,
+            "destiny_model_capacity_bytes": layer.destiny_model_capacity_bytes,
             "associativity": layer.associativity,
             "line_bytes": layer.line_bytes,
             "replacement_policy": layer.replacement_policy,
@@ -1870,6 +2208,31 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
             },
             "edram_read_equation": layer.edram_read,
             "refresh_equation": layer.refresh,
+            "sense_amplifier": layer.sense_amp,
+            "m3d": layer.m3d,
+            "static_power_components": layer.static_power_components,
+            "geometry_audit": geometry_audit(layer),
+            "latency_audit": {
+                "raw_destiny_hit_latency_ns": layer.raw_metrics.hit_latency_ns,
+                "raw_destiny_rbl_delay_ns": layer.raw_metrics.rbl_delay_ns,
+                "destiny_peripheral_read_latency_ns":
+                    layer.raw_metrics.peripheral_read_latency_ns,
+                "equation_cell_read_latency_ns": (
+                    layer.edram_read or {}
+                ).get("cell_read_latency_ns"),
+                "sense_amp_delta_ns": (
+                    layer.sense_amp or {}
+                ).get("hit_latency_delta_ns", 0.0),
+                "m3d_penalty_ns": (
+                    layer.m3d or {}
+                ).get("latency_penalty_ns", 0.0),
+                "effective_hit_latency_ns": layer.metrics.hit_latency_ns,
+                "interpretation": (
+                    "For equation-based eDRAM, SCOPE replaces only DESTINY's "
+                    "selected RBL delay with C_RBL*deltaV/Ion and retains "
+                    "peripheral/tag timing, then applies SA and M3D deltas."
+                ),
+            },
             "raw_destiny_metrics": asdict(layer.raw_metrics),
             "effective_metrics": asdict(layer.metrics),
             "combination_rule": (
@@ -1903,6 +2266,26 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
         "offchip_writebacks_per_request": hit_rates.offchip_writebacks_per_request,
         "trace_metadata": hit_rates.trace_metadata,
     }
+    trace = hit_rates.trace_metadata or {}
+    compulsory = trace.get("compulsory_misses", [0] * len(layer_specs))
+    noncompulsory = trace.get("noncompulsory_misses", [0] * len(layer_specs))
+    report["hit_rate_model"]["per_level_explanation"] = [
+        {
+            "layer": layer.name,
+            "conditional_accesses": hit_rates.accesses[index],
+            "conditional_hits": hit_rates.hits[index],
+            "conditional_hit_rate": hit_rates.hit_rates[index],
+            "compulsory_misses": int(compulsory[index]),
+            "noncompulsory_misses": int(noncompulsory[index]),
+            "reason": (
+                "This is a conditional hit rate after all upper-level hits were "
+                "filtered. A low middle-level rate can therefore mean the remaining "
+                "stream is dominated by first touches or conflicts, not that its "
+                "absolute capacity is ineffective."
+            ),
+        }
+        for index, layer in enumerate(layer_specs)
+    ]
     report["workload"] = workload
     report["off_chip"] = asdict(offchip)
     return model, report
@@ -2035,6 +2418,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     runner,
                     auto_build=not args.no_build,
                     device_library=device_library,
+                    model_library=library_raw,
                 )
             )
         feasible = [item for item in evaluations if item[1]["feasible"]]
@@ -2047,8 +2431,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "designs": [
                 {
                     "devices": [layer["device"] for layer in item[1]["layers"]],
+                    "sense_amplifiers": [
+                        (layer.get("sense_amplifier") or {}).get("selected_type")
+                        for layer in item[1]["layers"]
+                    ],
                     "average_latency_ns": item[1]["average_latency_ns"],
                     "average_power_mw": item[1]["average_power_mw"],
+                    "hit_rates": item[1]["hit_rates"],
+                    "offchip_reach_probability":
+                        item[1]["offchip_reach_probability"],
                     "fom_per_ns_mw": item[1]["fom_per_ns_mw"],
                     "guidance_score": item[1]["guidance_score"],
                     "capacities_bytes": [

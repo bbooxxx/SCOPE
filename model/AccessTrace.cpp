@@ -1,7 +1,6 @@
 #include "AccessTrace.h"
 
 #include <algorithm>
-#include <cmath>
 #include <stdexcept>
 #include <utility>
 
@@ -28,15 +27,55 @@ AccessTrace::AccessTrace(TraceConfig config) : config_(std::move(config)) {
     if (config_.operator_name != "attention" && config_.operator_name != "ffn") {
         throw std::invalid_argument("operator must be attention or ffn");
     }
-    if (config_.access_bytes == 0 || config_.working_set_stride_bytes == 0 ||
-        config_.working_set_stride_bytes % config_.access_bytes != 0 ||
-        config_.sampled_working_set_bytes < 4096) {
-        throw std::invalid_argument("invalid access or sampled working-set size");
-    }
-    if (std::abs(config_.read_fraction - 0.75) > 1e-12) {
-        throw std::invalid_argument("v4 trace currently requires read_fraction=0.75");
+    if (config_.access_bytes == 0 || config_.bytes_per_element == 0 ||
+        config_.working_set_stride_bytes == 0 ||
+        config_.working_set_stride_bytes % config_.access_bytes != 0) {
+        throw std::invalid_argument("invalid access geometry");
     }
 
+    const std::uint64_t elements_per_access = std::max<std::uint64_t>(
+        1, config_.access_bytes / config_.bytes_per_element);
+    if (config_.operator_name == "attention") {
+        const std::uint64_t q_tiles =
+            (config_.sequence_tokens + config_.tile_m - 1) / config_.tile_m;
+        const std::uint64_t q_elements =
+            config_.sequence_tokens * config_.hidden_size;
+        const std::uint64_t weight_elements =
+            4 * config_.hidden_size * config_.hidden_size;
+        analytical_working_set_bytes_ =
+            (weight_elements + 6 * q_elements) * config_.bytes_per_element;
+        analytical_loads_ =
+            (weight_elements + (3 + 2 * q_tiles) * q_elements
+             + elements_per_access - 1) /
+            elements_per_access;
+        analytical_stores_ =
+            (5 * q_elements + elements_per_access - 1) / elements_per_access;
+    } else {
+        const std::uint64_t weight_elements =
+            3 * config_.hidden_size * config_.intermediate_size;
+        const std::uint64_t activation_elements =
+            2 * config_.sequence_tokens * config_.hidden_size +
+            2 * config_.sequence_tokens * config_.intermediate_size;
+        analytical_working_set_bytes_ =
+            (weight_elements + activation_elements) * config_.bytes_per_element;
+        const std::uint64_t load_elements =
+            2 * config_.sequence_tokens * config_.hidden_size +
+            weight_elements +
+            2 * config_.sequence_tokens * config_.intermediate_size;
+        analytical_loads_ =
+            (load_elements + elements_per_access - 1) / elements_per_access;
+        const std::uint64_t store_elements =
+            2 * config_.sequence_tokens * config_.intermediate_size +
+            config_.sequence_tokens * config_.hidden_size;
+        analytical_stores_ =
+            (store_elements + elements_per_access - 1) / elements_per_access;
+    }
+    if (config_.sampled_working_set_bytes == 0) {
+        config_.sampled_working_set_bytes = analytical_working_set_bytes_;
+    }
+    if (config_.sampled_working_set_bytes < 4096) {
+        throw std::invalid_argument("sampled working set is too small");
+    }
     const std::uint64_t stream_bytes = config_.sampled_working_set_bytes / 2;
     const std::uint64_t stream_accesses =
         stream_bytes / config_.working_set_stride_bytes;
@@ -44,7 +83,15 @@ AccessTrace::AccessTrace(TraceConfig config) : config_(std::move(config)) {
         throw std::invalid_argument("sampled working set is too small");
     }
     cycle_accesses_ = stream_accesses * 4;
+    if (config_.cycle_access_cap > 0) {
+        cycle_accesses_ = std::min(cycle_accesses_, config_.cycle_access_cap);
+    }
     sampled_tensor_bytes_ = 2 * stream_bytes;
+}
+
+double AccessTrace::analytical_read_fraction() const {
+    return static_cast<double>(analytical_loads_) /
+           static_cast<double>(analytical_loads_ + analytical_stores_);
 }
 
 std::uint64_t AccessTrace::permute(std::uint64_t value, std::uint64_t modulus,
@@ -56,9 +103,15 @@ Access AccessTrace::at(std::uint64_t ordinal) const {
     const std::uint64_t stream_bytes = config_.sampled_working_set_bytes / 2;
     const std::uint64_t stream_accesses =
         stream_bytes / config_.working_set_stride_bytes;
-    const std::uint64_t local = (ordinal % cycle_accesses_) / 4;
+    const std::uint64_t cycle_ordinal = ordinal % cycle_accesses_;
+    const std::uint64_t local = cycle_ordinal;
     const std::uint64_t epoch = ordinal / cycle_accesses_;
-    const std::uint64_t lane = ordinal % 4;
+    const std::uint64_t operation_rank =
+        permute(cycle_ordinal, cycle_accesses_, 0x0F0U);
+    const std::uint64_t load_quota = static_cast<std::uint64_t>(
+        analytical_read_fraction() * static_cast<double>(cycle_accesses_));
+    const bool is_load = operation_rank < load_quota;
+    const std::uint64_t lane = permute(cycle_ordinal, 3, 0x1A2U);
     const std::uint64_t offset_a =
         permute(local, stream_accesses, 0xA11U) *
             config_.working_set_stride_bytes +
@@ -84,6 +137,14 @@ Access AccessTrace::at(std::uint64_t ordinal) const {
     const std::uint64_t tile_reuse = std::max<std::uint64_t>(
         1, config_.tile_m * config_.tile_n / config_.tile_k);
 
+    if (!is_load) {
+        const std::uint64_t tile_slot = (local / tile_reuse) % output_slots;
+        const std::uint64_t base = config_.operator_name == "attention"
+                                       ? kOutputBase
+                                       : kStateBase;
+        return {Operation::kStore, base + tile_slot * config_.access_bytes,
+                config_.access_bytes};
+    }
     if (lane == 0) {
         const std::uint64_t tile_slot = (local / tile_reuse) % activation_slots;
         return {Operation::kLoad,
@@ -98,18 +159,10 @@ Access AccessTrace::at(std::uint64_t ordinal) const {
         }
         return {Operation::kLoad, kWeightABase + offset_a, config_.access_bytes};
     }
-    if (lane == 2) {
-        const std::uint64_t base = config_.operator_name == "attention"
-                                       ? kWeightBBase
-                                       : kWeightBBase + stream_bytes;
-        return {Operation::kLoad, base + offset_b, config_.access_bytes};
-    }
-
-    const std::uint64_t tile_slot = (local / tile_reuse) % output_slots;
     const std::uint64_t base = config_.operator_name == "attention"
-                                   ? kOutputBase
-                                   : kStateBase;
-    return {Operation::kStore, base + tile_slot * config_.access_bytes,
+                                   ? kWeightBBase
+                                   : kWeightBBase + stream_bytes;
+    return {Operation::kLoad, base + offset_b,
             config_.access_bytes};
 }
 

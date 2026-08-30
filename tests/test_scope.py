@@ -34,6 +34,7 @@ def layer(name: str, latency: float, energy: float) -> scope.LayerSpec:
         device_family="SRAM",
         destiny_config=ROOT / "config/devices/sram.cfg",
         capacity_bytes=4096,
+        destiny_model_capacity_bytes=4096,
         associativity=1,
         line_bytes=64,
         replacement_policy="LRU",
@@ -67,6 +68,9 @@ class ScopeTests(unittest.TestCase):
             cls.library = json.load(stream)["devices"]
         with (ROOT / "config/device_library_v3.json").open(encoding="utf-8") as stream:
             cls.library_v3 = json.load(stream)["devices"]
+        with (ROOT / "config/device_library_v5.json").open(encoding="utf-8") as stream:
+            cls.library_v5_raw = json.load(stream)
+            cls.library_v5 = cls.library_v5_raw["devices"]
 
     def test_device_library_contains_all_screenshot_columns(self) -> None:
         self.assertEqual(
@@ -247,7 +251,7 @@ class ScopeTests(unittest.TestCase):
         )
         self.assertGreater(larger_result.hit_rates[1], result.hit_rates[1])
 
-    def test_v4_cpp_trace_has_configured_mix_and_capacity_sensitive_l3(self) -> None:
+    def test_cpp_trace_measures_shape_derived_mix_and_capacity_sensitive_l3(self) -> None:
         base_layers = [
             replace(layer("L1", 1.0, 0.1), capacity_bytes=32768,
                     associativity=8),
@@ -284,10 +288,108 @@ class ScopeTests(unittest.TestCase):
             {"read_fraction": 0.75, "hit_rate_model": hit_model},
             ROOT,
         )
-        self.assertEqual(small.observed_read_fraction, 0.75)
-        self.assertEqual(large.observed_read_fraction, 0.75)
+        self.assertAlmostEqual(
+            small.observed_read_fraction,
+            small.trace_metadata["analytical_read_fraction"],
+            delta=0.002,
+        )
+        self.assertAlmostEqual(
+            large.observed_read_fraction,
+            large.trace_metadata["analytical_read_fraction"],
+            delta=0.002,
+        )
+        self.assertNotEqual(small.observed_read_fraction, 0.75)
         self.assertGreater(large.hit_rates[2], small.hit_rates[2])
         self.assertEqual(large.trace_metadata["isa_access_bytes"], 16)
+        self.assertIn("compulsory_misses", large.trace_metadata)
+        self.assertIn("representative_access", large.trace_metadata)
+
+    def test_v5_full_layer_working_sets_exceed_l2(self) -> None:
+        config = scope.select_workload(
+            scope.load_json(ROOT / "config/scope_v5.json"), "attention"
+        )
+        model = dict(config["workload"]["hit_rate_model"])
+        model.update({
+            "trace_cycle_accesses": 4096,
+            "warmup_accesses": 1024,
+            "sample_accesses": 1024,
+        })
+        levels = [
+            replace(layer("L1", 1.0, 0.1), capacity_bytes=256 * 1024,
+                    associativity=8),
+            replace(layer("L2", 1.0, 0.1), capacity_bytes=32 * 1024 * 1024,
+                    associativity=16),
+            replace(layer("L3", 1.0, 0.1), capacity_bytes=384 * 1024 * 1024,
+                    associativity=16),
+        ]
+        result = scope.estimate_hit_rates(
+            levels, {"read_fraction": 0.5, "hit_rate_model": model}, ROOT
+        )
+        working_set = result.trace_metadata["analytical_working_set_bytes"]
+        self.assertEqual(working_set, 148717568)
+        self.assertGreater(working_set, levels[1].capacity_bytes)
+        self.assertEqual(
+            result.trace_metadata["sampled_tensor_bytes"], working_set
+        )
+
+    def test_v5_sa_separates_destiny_converter_and_checks_compatibility(self) -> None:
+        raw = replace(
+            metrics(2.0, 0.2),
+            sense_amp_latency_ns=1.5,
+            sense_amp_read_energy_nj=0.12,
+            sense_amp_leakage_mw=0.02,
+            legacy_iv_converter_latency_ns=1.0,
+            legacy_iv_converter_read_energy_nj=0.08,
+            legacy_iv_converter_leakage_mw=0.01,
+        )
+        result = scope.evaluate_sense_amp(
+            raw,
+            self.library_v5["SOT-MRAM"],
+            self.library_v5_raw["sense_amplifier_models"],
+            "current",
+        )
+        self.assertAlmostEqual(result.base_voltage_latency_ns, 0.5)
+        self.assertAlmostEqual(result.selected_latency_ns, 0.3)
+        self.assertAlmostEqual(result.selected_leakage_mw, 0.0002)
+        self.assertLess(result.selected_latency_ns, result.destiny_reported_latency_ns)
+        with self.assertRaises(ValueError):
+            scope.evaluate_sense_amp(
+                raw,
+                self.library_v5["SRAM"],
+                self.library_v5_raw["sense_amplifier_models"],
+                "current",
+            )
+
+    def test_v5_m3d_is_generic_and_scales_with_tiers(self) -> None:
+        defaults = self.library_v5_raw["m3d_defaults"]
+        one = scope.evaluate_m3d(
+            {"enabled": True, "tiers": 1}, defaults,
+            banks=4, line_bits=512, data_array_area_mm2=1.0,
+        )
+        four = scope.evaluate_m3d(
+            {"enabled": True, "tiers": 4}, defaults,
+            banks=4, line_bits=512, data_array_area_mm2=1.0,
+        )
+        self.assertEqual(one.latency_penalty_ns, 0.0)
+        self.assertGreater(four.latency_penalty_ns, 0.0)
+        self.assertGreater(four.energy_penalty_nj, 0.0)
+        self.assertGreater(four.footprint_mm2, 0.0)
+
+    def test_v5_thor_area_budget_and_target_capacities(self) -> None:
+        raw = scope.select_workload(
+            scope.load_json(ROOT / "config/scope_v5.json"), "attention"
+        )
+        variants = scope.design_variants(raw, True, ROOT, self.library_v5)
+        target = next(
+            variant for variant in variants
+            if [item["device"] for item in variant["layers"]]
+            == ["SRAM", "TFET-eDRAM", "OSFET-eDRAM"]
+        )
+        self.assertEqual(
+            [item["capacity_bytes"] for item in target["layers"]],
+            [256 * 1024, 32 * 1024 * 1024, 384 * 1024 * 1024],
+        )
+        self.assertTrue(target["layers"][2]["m3d"]["enabled"])
 
     def test_v4_uses_orin_lpddr5_and_screened_search_space(self) -> None:
         config = json.loads((ROOT / "config/scope_v4.json").read_text())

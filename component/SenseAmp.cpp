@@ -14,6 +14,9 @@ SenseAmp::SenseAmp() {
 	// TODO Auto-generated constructor stub
 	initialized = false;
 	invalid = false;
+	ivConverterLatency = 0;
+	ivConverterDynamicEnergy = 0;
+	ivConverterLeakage = 0;
 }
 
 SenseAmp::~SenseAmp() {
@@ -104,22 +107,24 @@ void SenseAmp::CalculateLatency(double _rampInput) {	/* _rampInput is actually n
 		cout << "[Sense Amp] Error: Require initialization first!" << endl;
 	} else {
 		readLatency = writeLatency = 0;
+		ivConverterLatency = 0;
 		if (currentSense) {	/* current-sensing needs IV converter */
 			/* all the following values achieved from HSPICE */
 			if (tech->featureSize >= 179e-9)
-				readLatency += 0.46e-9;		/* 120nm */
+				ivConverterLatency = 0.46e-9;		/* 120nm */
 			else if (tech->featureSize >= 119e-9)
-				readLatency += 0.49e-9;		/* 120nm */
+				ivConverterLatency = 0.49e-9;		/* 120nm */
 			else if (tech->featureSize >= 89e-9)
-				readLatency += 0.53e-9;		/* 90nm */
+				ivConverterLatency = 0.53e-9;		/* 90nm */
 			else if (tech->featureSize >= 64e-9)
-				readLatency += 0.62e-9;		/* 65nm */
+				ivConverterLatency = 0.62e-9;		/* 65nm */
 			else if (tech->featureSize >= 44e-9)
-				readLatency += 0.80e-9;		/* 45nm */
+				ivConverterLatency = 0.80e-9;		/* 45nm */
 			else if (tech->featureSize >= 31e-9)
-				readLatency += 1.07e-9;		/* 32nm */
+				ivConverterLatency = 1.07e-9;		/* 32nm */
 			else
-				readLatency += 1.45e-9;     /* below 22nm */
+				ivConverterLatency = 1.45e-9;     /* below 22nm */
+			readLatency += ivConverterLatency;
 		}
 
 		/* Voltage sense amplifier */
@@ -139,27 +144,31 @@ void SenseAmp::CalculatePower() {
 	} else {
 		readDynamicEnergy = writeDynamicEnergy = 0;
 		leakage = 0;
+		ivConverterDynamicEnergy = 0;
+		ivConverterLeakage = 0;
 		if (currentSense) {	/* current-sensing needs IV converter */
 			/* all the following values achieved from HSPICE */
 			if (tech->featureSize >= 119e-9) {			/* 120nm */
-				readDynamicEnergy += 8.52e-14;	/* Unit: J */
-				leakage += 1.40e-8;				/* Unit: W */
+				ivConverterDynamicEnergy = 8.52e-14;	/* Unit: J */
+				ivConverterLeakage = 1.40e-8;				/* Unit: W */
 			} else if (tech->featureSize >= 89e-9) {	/* 90nm */
-				readDynamicEnergy += 8.72e-14;
-				leakage += 1.87e-8;
+				ivConverterDynamicEnergy = 8.72e-14;
+				ivConverterLeakage = 1.87e-8;
 			} else if (tech->featureSize >= 64e-9) {	/* 65nm */
-				readDynamicEnergy += 9.00e-14;
-				leakage += 2.57e-8;
+				ivConverterDynamicEnergy = 9.00e-14;
+				ivConverterLeakage = 2.57e-8;
 			} else if (tech->featureSize >= 44e-9) {	/* 45nm */
-				readDynamicEnergy += 10.26e-14;
-				leakage += 4.41e-9;
+				ivConverterDynamicEnergy = 10.26e-14;
+				ivConverterLeakage = 4.41e-9;
 			} else if (tech->featureSize >= 31e-9) {	/* 32nm */
-				readDynamicEnergy += 12.56e-14;
-				leakage += 12.54e-8;
+				ivConverterDynamicEnergy = 12.56e-14;
+				ivConverterLeakage = 12.54e-8;
 			} else {                                    /* TO-DO, need calibration below 22nm */
-				readDynamicEnergy += 15e-14;
-				leakage += 15e-8;
+				ivConverterDynamicEnergy = 15e-14;
+				ivConverterLeakage = 15e-8;
 			}
+			readDynamicEnergy += ivConverterDynamicEnergy;
+			leakage += ivConverterLeakage;
 		}
 
 		/* Voltage sense amplifier */
@@ -170,6 +179,8 @@ void SenseAmp::CalculatePower() {
 
 		readDynamicEnergy *= numColumn;
 		leakage *= numColumn;
+		ivConverterDynamicEnergy *= numColumn;
+		ivConverterLeakage *= numColumn;
 
         refreshDynamicEnergy = readDynamicEnergy;
 	}
@@ -205,6 +216,9 @@ SenseAmp & SenseAmp::operator=(const SenseAmp &rhs) {
 	senseVoltage = rhs.senseVoltage;
 	capLoad = rhs.capLoad;
 	pitchSenseAmp = rhs.pitchSenseAmp;
+	ivConverterLatency = rhs.ivConverterLatency;
+	ivConverterDynamicEnergy = rhs.ivConverterDynamicEnergy;
+	ivConverterLeakage = rhs.ivConverterLeakage;
 
 	return *this;
 }

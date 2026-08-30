@@ -32,6 +32,9 @@ public:
 	double senseVoltage;	/* Minimum sensible voltage */
 	double capLoad;		/* Load capacitance of sense amplifier */
 	double pitchSenseAmp;	/* The maximum width allowed for one sense amplifier layout */
+	double ivConverterLatency;	/* Legacy current-sense I-V converter latency */
+	double ivConverterDynamicEnergy;	/* Legacy current-sense I-V converter energy */
+	double ivConverterLeakage;	/* Legacy current-sense I-V converter leakage */
 };
 
 #endif /* SENSEAMP_H_ */

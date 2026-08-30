@@ -1,0 +1,121 @@
+{
+  "schema_version": 5,
+  "source": "Memory_Tech_Comparison.xlsx plus SCOPE v3 equations and v5 SA/M3D overlays",
+  "semantics": {
+    "dynamic_energy_unit": "fJ/bit/access",
+    "leakage_unit": "per data bit unless a model is named",
+    "edram_read_functions": "DESTINY selects Nrow/Ncolumn and C_RBL; SCOPE evaluates Lr=C_RBL*deltaV/Ion and Er=0.5*C_RBL*(Vdd^2-(Vdd-deltaV)^2)",
+    "sa_overlay": "DESTINY native SA is audited; v5 removes the legacy I-V converter and evaluates compatible topology factors from a common voltage-latch baseline",
+    "m3d_overlay": "generic tier/via model applied after a single-tier DESTINY run to avoid double counting"
+  },
+  "tag_address_bits": 49,
+  "tag_state_bits_per_line": 2,
+  "tag_sram_leakage_pw_per_bit": 27.5,
+  "sense_amplifier_models": {
+    "voltage": {
+      "latency_factor": 1.0,
+      "energy_factor": 1.0,
+      "leakage_factor": 0.01,
+      "basis": "DESTINY converter-free voltage latch baseline"
+    },
+    "current": {
+      "latency_factor": 0.6,
+      "energy_factor": 1.2,
+      "leakage_factor": 0.02,
+      "basis": "behavior-level topology sweep: about 40% faster with power tradeoff"
+    }
+  },
+  "m3d_defaults": {
+    "enabled": false,
+    "tiers": 1,
+    "vdd": 1.2,
+    "via_resistance_ohm": 5.5,
+    "via_capacitance_ff": 0.1,
+    "via_pitch_um": 0.1,
+    "driver_resistance_ohm": 200.0,
+    "address_bits": 49,
+    "control_bits": 8
+  },
+  "devices": {
+    "STT-MRAM": {
+      "family": "MRAM", "destiny_cfg": "config/devices/stt_mram.cfg",
+      "read_latency": {"model": "constant", "value_ns": 10.0},
+      "read_energy": {"model": "constant", "value_fj_per_bit": 41.0},
+      "write_latency": {"model": "constant", "value_ns": 20.0},
+      "write_energy": {"model": "constant", "value_fj_per_bit": 100.0},
+      "leakage": {"model": "constant", "value_pw_per_bit": 0.0},
+      "refresh": {"model": "constant", "value_aw_per_bit": 0.0},
+      "endurance": {"model": "constant", "writes_per_line": 1000000000.0},
+      "variation": "low", "density_f2": 53.0,
+      "sense_amplifier": {"destiny_native_type": "current", "default_type": "current", "read_signal": "resistive/current", "supported_types": ["current", "voltage"]}
+    },
+    "SOT-MRAM": {
+      "family": "MRAM", "destiny_cfg": "config/devices/sot_mram.cfg",
+      "read_latency": {"model": "constant", "value_ns": 1.0},
+      "read_energy": {"model": "constant", "value_fj_per_bit": 18.3},
+      "write_latency": {"model": "constant", "value_ns": 10.0},
+      "write_energy": {"model": "constant", "value_fj_per_bit": 102.0},
+      "leakage": {"model": "constant", "value_pw_per_bit": 0.0},
+      "refresh": {"model": "constant", "value_aw_per_bit": 0.0},
+      "endurance": {"model": "constant", "writes_per_line": 100000000000000.0},
+      "variation": "low", "density_f2": 100.0,
+      "sense_amplifier": {"destiny_native_type": "current", "default_type": "current", "read_signal": "resistive/current", "supported_types": ["current", "voltage"]}
+    },
+    "SRAM": {
+      "family": "SRAM", "destiny_cfg": "config/devices/sram.cfg",
+      "read_latency": {"model": "constant", "value_ns": 1.0},
+      "read_energy": {"model": "constant", "value_fj_per_bit": 21.5},
+      "write_latency": {"model": "constant", "value_ns": 1.0},
+      "write_energy": {"model": "constant", "value_fj_per_bit": 16.2},
+      "leakage": {"model": "constant", "value_pw_per_bit": 27.5},
+      "refresh": {"model": "constant", "value_aw_per_bit": 0.0},
+      "endurance": {"model": "lower_bound", "writes_per_line": 1000000000000000.0},
+      "variation": "low", "density_f2": 140.0,
+      "sense_amplifier": {"destiny_native_type": "voltage", "default_type": "voltage", "read_signal": "differential voltage", "supported_types": ["voltage"]}
+    },
+    "Si-eDRAM": {
+      "family": "eDRAM", "destiny_cfg": "config/devices/si_edram.cfg",
+      "read_latency": {"model": "rbl_equation"}, "read_energy": {"model": "rbl_equation"},
+      "read_circuit": {"path": "pure Si MOSFET (s)", "vdd": 1.2, "delta_v": 0.1, "ion_ua_per_um": 33.1, "effective_width_um": 1.0, "ion_source": "https://ri.conicet.gov.ar/bitstream/handle/11336/271609/CONICET_Digital_Nro.863d9ea0-aa1e-4f81-b71d-726676f314af_B.pdf?isAllowed=y&sequence=2"},
+      "write_latency": {"model": "constant", "value_ns": 2.0},
+      "write_energy": {"model": "constant", "value_fj_per_bit": 2.5},
+      "leakage": {"model": "none"}, "refresh": {"model": "row_read_write", "only_device_with_refresh": true},
+      "endurance": {"model": "lower_bound", "writes_per_line": 1000000000000000.0},
+      "variation": "low", "density_f2": 35.0,
+      "sense_amplifier": {"destiny_native_type": "voltage", "default_type": "voltage", "read_signal": "charge-to-voltage", "supported_types": ["voltage"]}
+    },
+    "TFET-eDRAM": {
+      "family": "eDRAM", "destiny_cfg": "config/devices/tfet_edram.cfg",
+      "read_latency": {"model": "rbl_equation"}, "read_energy": {"model": "rbl_equation"},
+      "read_circuit": {"path": "pure Si MOSFET read transistor (s)", "vdd": 1.2, "delta_v": 0.1, "ion_ua_per_um": 33.1, "effective_width_um": 1.0, "ion_source": "https://ri.conicet.gov.ar/bitstream/handle/11336/271609/CONICET_Digital_Nro.863d9ea0-aa1e-4f81-b71d-726676f314af_B.pdf?isAllowed=y&sequence=2"},
+      "write_latency": {"model": "constant", "value_ns": 3.0},
+      "write_energy": {"model": "constant", "value_fj_per_bit": 10.0},
+      "leakage": {"model": "none"}, "refresh": {"model": "none"},
+      "endurance": {"model": "lower_bound", "writes_per_line": 1000000000000000.0},
+      "variation": "low", "density_f2": 35.0,
+      "sense_amplifier": {"destiny_native_type": "voltage", "default_type": "voltage", "read_signal": "charge-to-voltage", "supported_types": ["voltage"]}
+    },
+    "2D-eDRAM": {
+      "family": "eDRAM", "destiny_cfg": "config/devices/2d_edram.cfg",
+      "read_latency": {"model": "rbl_equation", "selected_path": "pure"}, "read_energy": {"model": "rbl_equation"},
+      "read_circuit": {"path": "pure 2D-FET (d)", "vdd": 1.2, "delta_v": 0.1, "ion_ua_per_um": 120.0, "effective_width_um": 1.0, "ion_source": "https://www.nature.com/articles/s41928-024-01158-4"},
+      "write_latency": {"model": "constant", "value_ns": 20.0},
+      "write_energy": {"model": "constant", "value_fj_per_bit": 10.0},
+      "leakage": {"model": "none"}, "refresh": {"model": "none"},
+      "endurance": {"model": "lower_bound", "writes_per_line": 1000000000000000.0},
+      "variation": "low", "density_f2": 35.0,
+      "sense_amplifier": {"destiny_native_type": "voltage", "default_type": "voltage", "read_signal": "charge-to-voltage", "supported_types": ["voltage"]}
+    },
+    "OSFET-eDRAM": {
+      "family": "eDRAM", "destiny_cfg": "config/devices/osfet_edram.cfg",
+      "read_latency": {"model": "rbl_equation", "selected_path": "pure"}, "read_energy": {"model": "rbl_equation"},
+      "read_circuit": {"path": "pure a-IGZO OSFET (o)", "vdd": 1.2, "delta_v": 0.1, "ion_ua_per_um": 6.0, "effective_width_um": 1.0, "ion_source": "https://advanced.onlinelibrary.wiley.com/doi/full/10.1002/aelm.202300150"},
+      "write_latency": {"model": "constant", "value_ns": 10.0},
+      "write_energy": {"model": "constant", "value_fj_per_bit": 10.0},
+      "leakage": {"model": "none"}, "refresh": {"model": "none"},
+      "endurance": {"model": "not_limiting", "writes_per_line": 1e30},
+      "variation": "high BTI-variation", "density_f2": 35.0, "density_divisor": "N stacked tiers",
+      "sense_amplifier": {"destiny_native_type": "voltage", "default_type": "voltage", "read_signal": "charge-to-voltage", "supported_types": ["voltage"]}
+    }
+  }
+}

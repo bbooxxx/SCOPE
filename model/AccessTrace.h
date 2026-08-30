@@ -25,10 +25,11 @@ struct TraceConfig {
     std::uint64_t tile_m = 16;
     std::uint64_t tile_n = 64;
     std::uint64_t tile_k = 32;
-    std::uint64_t sampled_working_set_bytes = 24ULL * 1024ULL * 1024ULL;
+    std::uint64_t sampled_working_set_bytes = 0;
+    std::uint64_t cycle_access_cap = 0;
     std::size_t access_bytes = 16;
     std::size_t working_set_stride_bytes = 64;
-    double read_fraction = 0.75;
+    std::size_t bytes_per_element = 2;
     std::uint64_t seed = 7;
 };
 
@@ -40,6 +41,12 @@ class AccessTrace {
     const TraceConfig& config() const { return config_; }
     std::uint64_t cycle_accesses() const { return cycle_accesses_; }
     std::uint64_t sampled_tensor_bytes() const { return sampled_tensor_bytes_; }
+    std::uint64_t analytical_loads() const { return analytical_loads_; }
+    std::uint64_t analytical_stores() const { return analytical_stores_; }
+    std::uint64_t analytical_working_set_bytes() const {
+        return analytical_working_set_bytes_;
+    }
+    double analytical_read_fraction() const;
 
   private:
     std::uint64_t permute(std::uint64_t value, std::uint64_t modulus,
@@ -48,6 +55,9 @@ class AccessTrace {
     TraceConfig config_;
     std::uint64_t cycle_accesses_ = 0;
     std::uint64_t sampled_tensor_bytes_ = 0;
+    std::uint64_t analytical_loads_ = 0;
+    std::uint64_t analytical_stores_ = 0;
+    std::uint64_t analytical_working_set_bytes_ = 0;
 };
 
 }  // namespace scope_model

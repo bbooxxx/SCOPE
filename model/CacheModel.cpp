@@ -39,6 +39,10 @@ bool CacheHierarchy::Cache::probe(std::uint64_t line, bool mark_dirty) {
     return false;
 }
 
+bool CacheHierarchy::Cache::first_reference(std::uint64_t line) {
+    return seen_lines_.insert(line).second;
+}
+
 std::size_t CacheHierarchy::Cache::victim(const std::vector<Entry>& entries) {
     if (config_.policy == "RANDOM") {
         random_state_ = random_state_ * 6364136223846793005ULL + 1;
@@ -111,7 +115,7 @@ void CacheHierarchy::writeback(std::size_t level, std::uint64_t line,
     }
 }
 
-void CacheHierarchy::process(const Access& access, bool record,
+void CacheHierarchy::process(const Access& access, bool record, bool capture,
                              SimulationResult* result) {
     if (record) {
         ++result->measured_requests;
@@ -119,16 +123,26 @@ void CacheHierarchy::process(const Access& access, bool record,
     }
     const std::uint64_t line = access.address / line_bytes_;
     std::vector<std::size_t> missed;
+    std::string hit_level = "OFF";
     for (std::size_t level = 0; level < caches_.size(); ++level) {
         if (record) {
             ++result->levels[level].accesses;
         }
+        const bool compulsory = caches_[level].first_reference(line);
         const bool dirty = access.operation == Operation::kStore && level == 0;
         if (caches_[level].probe(line, dirty)) {
             if (record) {
                 ++result->levels[level].hits;
             }
+            hit_level = "L" + std::to_string(level + 1);
             break;
+        }
+        if (record) {
+            if (compulsory) {
+                ++result->levels[level].compulsory_misses;
+            } else {
+                ++result->levels[level].noncompulsory_misses;
+            }
         }
         missed.push_back(level);
     }
@@ -139,6 +153,10 @@ void CacheHierarchy::process(const Access& access, bool record,
         if (caches_[level].insert(line, dirty, &evicted) && evicted.dirty) {
             writeback(level + 1, evicted.line, record, result);
         }
+    }
+    if (capture) {
+        result->representative = {
+            true, access.operation, access.address, access.size_bytes, hit_level};
     }
 }
 
@@ -152,7 +170,9 @@ SimulationResult CacheHierarchy::run(const AccessTrace& trace,
     result.levels.resize(caches_.size());
     const std::uint64_t total = warmup_accesses + sample_accesses;
     for (std::uint64_t ordinal = 0; ordinal < total; ++ordinal) {
-        process(trace.at(ordinal), ordinal >= warmup_accesses, &result);
+        const bool record = ordinal >= warmup_accesses;
+        const bool capture = ordinal == warmup_accesses + sample_accesses / 2;
+        process(trace.at(ordinal), record, capture, &result);
     }
     return result;
 }

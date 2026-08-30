@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace scope_model {
@@ -22,6 +23,16 @@ struct CacheStats {
     std::uint64_t accesses = 0;
     std::uint64_t hits = 0;
     std::uint64_t writebacks = 0;
+    std::uint64_t compulsory_misses = 0;
+    std::uint64_t noncompulsory_misses = 0;
+};
+
+struct RepresentativeAccess {
+    bool valid = false;
+    Operation operation = Operation::kLoad;
+    std::uint64_t address = 0;
+    std::size_t size_bytes = 0;
+    std::string hit_level;
 };
 
 struct SimulationResult {
@@ -29,6 +40,7 @@ struct SimulationResult {
     std::uint64_t measured_requests = 0;
     std::uint64_t measured_loads = 0;
     std::uint64_t offchip_writebacks = 0;
+    RepresentativeAccess representative;
 };
 
 class CacheHierarchy {
@@ -50,6 +62,7 @@ class CacheHierarchy {
         Cache(CacheConfig config, std::uint64_t seed);
         bool probe(std::uint64_t line, bool mark_dirty);
         bool insert(std::uint64_t line, bool dirty, Entry* evicted);
+        bool first_reference(std::uint64_t line);
 
       private:
         std::size_t victim(const std::vector<Entry>& entries);
@@ -59,11 +72,13 @@ class CacheHierarchy {
         std::uint64_t clock_ = 0;
         std::uint64_t random_state_;
         std::unordered_map<std::uint64_t, std::vector<Entry>> sets_;
+        std::unordered_set<std::uint64_t> seen_lines_;
     };
 
     void writeback(std::size_t level, std::uint64_t line, bool record,
                    SimulationResult* result);
-    void process(const Access& access, bool record, SimulationResult* result);
+    void process(const Access& access, bool record, bool capture,
+                 SimulationResult* result);
 
     std::vector<Cache> caches_;
     std::size_t line_bytes_ = 0;

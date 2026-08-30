@@ -730,6 +730,20 @@ void Result::printAsCache(Result &tagResult, CacheAccessMode cacheAccessMode) {
 				bank->mat.subarray.capBitline - rblCellCapacitance);
 		double rblEnergy = bank->mat.subarray.capBitline
 				* bank->mat.subarray.senseVoltage * devtech->vdd * bank->blockSize;
+		double activeSubarrays = bank->mat.numActiveSubarrayPerRow
+				* bank->mat.numActiveSubarrayPerColumn
+				* bank->numActiveMatPerRow * bank->numActiveMatPerColumn;
+		double allSubarrays = bank->mat.numRowSubarray
+				* bank->mat.numColumnSubarray
+				* bank->numRowMat * bank->numColumnMat;
+		double activeSenseAmpEnergy = bank->mat.subarray.senseAmp.readDynamicEnergy
+				* activeSubarrays;
+		double activeIVConverterEnergy = bank->mat.subarray.senseAmp.ivConverterDynamicEnergy
+				* activeSubarrays;
+		double totalSenseAmpLeakage = bank->mat.subarray.senseAmp.leakage
+				* allSubarrays;
+		double totalIVConverterLeakage = bank->mat.subarray.senseAmp.ivConverterLeakage
+				* allSubarrays;
 		cout << "SCOPE Selected Data Subarray Rows = "
 				<< bank->mat.subarray.numRow << endl;
 		cout << "SCOPE Selected Data Subarray Columns = "
@@ -752,6 +766,44 @@ void Result::printAsCache(Result &tagResult, CacheAccessMode cacheAccessMode) {
 		cout << "SCOPE Selected Peripheral Read Energy = "
 				<< MAX(0.0, cacheHitDynamicEnergy - rblEnergy) * 1e9
 				<< "nJ" << endl;
+		cout << "SCOPE Selected Data Array Area = "
+				<< bank->area * 1e6 << "mm^2" << endl;
+		cout << "SCOPE Selected Native Sense Amplifier Type = "
+				<< (cell->readMode ? "voltage" : "current") << endl;
+		cout << "SCOPE Selected Sense Amplifier Count = "
+				<< bank->mat.subarray.numSenseAmp * allSubarrays << endl;
+		cout << "SCOPE Selected Sense Amplifier Latency = "
+				<< bank->mat.subarray.senseAmp.readLatency * 1e9 << "ns" << endl;
+		cout << "SCOPE Selected Sense Amplifier Read Energy = "
+				<< activeSenseAmpEnergy * 1e9 << "nJ" << endl;
+		cout << "SCOPE Selected Sense Amplifier Leakage = "
+				<< totalSenseAmpLeakage * 1e3 << "mW" << endl;
+		cout << "SCOPE Selected Legacy IV Converter Latency = "
+				<< bank->mat.subarray.senseAmp.ivConverterLatency * 1e9 << "ns" << endl;
+		cout << "SCOPE Selected Legacy IV Converter Read Energy = "
+				<< activeIVConverterEnergy * 1e9 << "nJ" << endl;
+		cout << "SCOPE Selected Legacy IV Converter Leakage = "
+				<< totalIVConverterLeakage * 1e3 << "mW" << endl;
+		cout << "SCOPE Selected Tag Lookup Latency = "
+				<< cacheMissLatency * 1e9 << "ns" << endl;
+		cout << "SCOPE Selected Tag Lookup Energy = "
+				<< cacheMissDynamicEnergy * 1e9 << "nJ" << endl;
+		cout << "SCOPE Selected Data Bank Latency = "
+				<< bank->readLatency * 1e9 << "ns" << endl;
+		cout << "SCOPE Selected Data Routing Latency = "
+				<< bank->routingReadLatency * 1e9 << "ns" << endl;
+		cout << "SCOPE Selected Data Predecoder Latency = "
+				<< bank->mat.predecoderLatency * 1e9 << "ns" << endl;
+		cout << "SCOPE Selected Data Row Decoder Latency = "
+				<< bank->mat.subarray.rowDecoder.readLatency * 1e9 << "ns" << endl;
+		cout << "SCOPE Selected Data Mux Latency = "
+				<< (bank->mat.subarray.bitlineMux.readLatency
+						+ bank->mat.subarray.senseAmpMuxLev1.readLatency
+						+ bank->mat.subarray.senseAmpMuxLev2.readLatency) * 1e9 << "ns" << endl;
+		cout << "SCOPE Selected Data Precharge Latency = "
+				<< bank->mat.subarray.precharger.readLatency * 1e9 << "ns" << endl;
+		cout << "SCOPE Selected Tag Comparator Latency = "
+				<< tagResult.bank->mat.comparator.readLatency * 1e9 << "ns" << endl;
 		cout << "Area:" << endl;
 		cout << " - Total Area = " << cacheArea * 1e6 << "mm^2" << endl;
 		cout << " |--- Data Array Area = " << bank->height * 1e6 << "um x " << bank->width * 1e6 << "um = " << bank->area * 1e6 << "mm^2" << endl;
