@@ -75,6 +75,8 @@ public:
 	int maxNumRowSubarray;
 	int minNumColumnSubarray;
 	int maxNumColumnSubarray;
+	long long maxPhysicalRowsPerSubarray;
+	long long maxPhysicalColumnsPerSubarray;
 	int minNumActiveSubarrayPerRow;
 	int maxNumActiveSubarrayPerRow;
 	int minNumActiveSubarrayPerColumn;

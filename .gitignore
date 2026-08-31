@@ -6,6 +6,7 @@ config/.scope-cache/
 results/scope_v3_*.json
 results/scope_v4_*.json
 results/scope_v5_*.json
+results/scope_v6_*.json
 Makefile.dep
 destiny
 scope_model

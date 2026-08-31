@@ -71,6 +71,10 @@ class ScopeTests(unittest.TestCase):
         with (ROOT / "config/device_library_v5.json").open(encoding="utf-8") as stream:
             cls.library_v5_raw = json.load(stream)
             cls.library_v5 = cls.library_v5_raw["devices"]
+        cls.library_v6_raw = scope.load_model_library(
+            ROOT / "config/device_library_v6.json", ROOT
+        )
+        cls.library_v6 = cls.library_v6_raw["devices"]
 
     def test_device_library_contains_all_screenshot_columns(self) -> None:
         self.assertEqual(
@@ -390,6 +394,77 @@ class ScopeTests(unittest.TestCase):
             [256 * 1024, 32 * 1024 * 1024, 384 * 1024 * 1024],
         )
         self.assertTrue(target["layers"][2]["m3d"]["enabled"])
+
+    def test_v6_edram_nonideal_penalty_scales_with_longer_rbl(self) -> None:
+        entry = self.library_v6["OSFET-eDRAM"]
+        short = replace(
+            metrics(10.0, 0.1), subarray_rows=256, subarray_columns=512,
+            rbl_capacitance_ff=80.0, rwl_resistance_ohm=665.0,
+            rbl_resistance_ohm=1942.0,
+        )
+        long = replace(
+            short, subarray_rows=1024, rbl_capacitance_ff=320.0,
+            rbl_resistance_ohm=7767.0,
+        )
+        sa = {"input_referred_noise_mv": 8.0}
+        short_result = scope.evaluate_nonideal(
+            short, 10.0, 512, entry, sa, 1e-9
+        )
+        long_result = scope.evaluate_nonideal(
+            long, 10.0, 512, entry, sa, 1e-9
+        )
+        self.assertGreater(long_result.rbl_ir_drop_mv, short_result.rbl_ir_drop_mv)
+        self.assertGreater(long_result.read_latency_penalty_ns,
+                           short_result.read_latency_penalty_ns)
+        self.assertLess(long_result.real_selected_current_ua,
+                        long_result.ideal_selected_current_ua)
+
+    def test_v6_stt_read_disturb_limits_read_not_write_current(self) -> None:
+        raw = replace(
+            metrics(10.0, 0.1), subarray_rows=256, subarray_columns=256,
+            rwl_resistance_ohm=200.0, rbl_resistance_ohm=300.0,
+        )
+        result = scope.evaluate_nonideal(
+            raw, 10.0, 512, self.library_v6["STT-MRAM"],
+            {"input_referred_noise_mv": 8.0}, 1e-12,
+        )
+        self.assertTrue(result.read_disturb_current_limited)
+        self.assertLessEqual(result.read_disturb_probability_per_read,
+                             result.read_disturb_target_per_read * (1.0 + 1e-9))
+        self.assertGreater(result.read_latency_penalty_ns, 0.0)
+        self.assertIn("write current is unchanged", result.reliability_model)
+
+    def test_v6_m3d_uses_driven_delay_not_only_tiny_intrinsic_rc(self) -> None:
+        result = scope.evaluate_m3d(
+            {"enabled": True, "tiers": 4},
+            self.library_v6_raw["m3d_defaults"],
+            banks=16, line_bits=512, data_array_area_mm2=10.0,
+        )
+        self.assertAlmostEqual(result.latency_penalty_ns, 0.06)
+        self.assertGreater(result.latency_penalty_ns,
+                           result.intrinsic_rc_latency_ns * 1000)
+
+    def test_v6_noc_separates_request_response_router_and_wire(self) -> None:
+        raw = json.loads((ROOT / "config/scope_v6.json").read_text())
+        self.assertEqual({layer["line_bytes"] for layer in raw["layers"]},
+                         {128})
+        self.assertEqual(raw["off_chip"]["transaction_bytes"], 128)
+        link = scope.build_crossbar(raw["crossbars"][0])
+        self.assertAlmostEqual(link.request_latency_ns, 1.0)
+        self.assertAlmostEqual(link.response_latency_ns, 1.0)
+        self.assertAlmostEqual(link.latency_ns, 2.0)
+        self.assertEqual(link.response_bits, 1024)
+        self.assertAlmostEqual(link.energy_nj, 0.218688)
+
+    def test_v6_library_overlay_does_not_change_v5_schema(self) -> None:
+        self.assertEqual(self.library_v5_raw["schema_version"], 5)
+        self.assertEqual(self.library_v6_raw["schema_version"], 6)
+        self.assertNotIn("nonideal", self.library_v5["OSFET-eDRAM"])
+        self.assertTrue(self.library_v6["OSFET-eDRAM"]["nonideal"]["enabled"])
+        self.assertEqual(
+            self.library_v6["OSFET-eDRAM"]["read_circuit"],
+            self.library_v5["OSFET-eDRAM"]["read_circuit"],
+        )
 
     def test_v4_uses_orin_lpddr5_and_screened_search_space(self) -> None:
         config = json.loads((ROOT / "config/scope_v4.json").read_text())

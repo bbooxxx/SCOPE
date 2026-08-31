@@ -94,6 +94,15 @@ void Mat::Initialize(int _numRowSubarray, int _numColumnSubarray, int _numAddres
 	if (memoryType == tag)
 		numColumn *= numWay;
 
+	if (memoryType == MemoryType::data && ((inputParameter->maxPhysicalRowsPerSubarray > 0
+			&& numRow > inputParameter->maxPhysicalRowsPerSubarray)
+			|| (inputParameter->maxPhysicalColumnsPerSubarray > 0
+			&& numColumn > inputParameter->maxPhysicalColumnsPerSubarray))) {
+		invalid = true;
+		initialized = true;
+		return;
+	}
+
 	subarray.Initialize(numRow, numColumn, numRowPerSet > 1, true /* TO-DO: need to correct */,
 			muxSenseAmp, internalSenseAmp, muxOutputLev1, muxOutputLev2, areaOptimizationLevel, monolithicStackCount);
 

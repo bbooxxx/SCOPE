@@ -756,6 +756,12 @@ void Result::printAsCache(Result &tagResult, CacheAccessMode cacheAccessMode) {
 				<< rblCellCapacitance * 1e15 << "fF" << endl;
 		cout << "SCOPE Selected RBL Length = "
 				<< bank->mat.subarray.lenBitline * 1e6 << "um" << endl;
+		cout << "SCOPE Selected RWL Length = "
+				<< bank->mat.subarray.lenWordline * 1e6 << "um" << endl;
+		cout << "SCOPE Selected RBL Resistance = "
+				<< bank->mat.subarray.resBitline << "ohm" << endl;
+		cout << "SCOPE Selected RWL Resistance = "
+				<< bank->mat.subarray.resWordline << "ohm" << endl;
 		cout << "SCOPE Selected RBL Delay = "
 				<< bank->mat.subarray.bitlineDelay * 1e9 << "ns" << endl;
 		cout << "SCOPE Selected RBL Read Energy = "

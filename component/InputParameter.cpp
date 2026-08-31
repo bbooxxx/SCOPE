@@ -36,6 +36,8 @@ InputParameter::InputParameter() {
 	maxNumRowSubarray = 2;
 	minNumColumnSubarray = 1;
 	maxNumColumnSubarray = 2;
+	maxPhysicalRowsPerSubarray = 0;
+	maxPhysicalColumnsPerSubarray = 0;
 	minNumActiveSubarrayPerRow = 1;
 	maxNumActiveSubarrayPerRow = maxNumColumnSubarray;
 	minNumActiveSubarrayPerColumn = 1;
@@ -470,6 +472,20 @@ void InputParameter::ReadInputParameterFromFile(const std::string & inputFile) {
 			maxNumColumnSubarray = minNumColumnSubarray;
 			maxNumActiveSubarrayPerColumn = minNumActiveSubarrayPerColumn;
 			maxNumActiveSubarrayPerRow = minNumActiveSubarrayPerRow;
+			continue;
+		}
+
+		if (!strncmp("-MaxPhysicalSubarrayRows", line,
+				strlen("-MaxPhysicalSubarrayRows"))) {
+			sscanf(line, "-MaxPhysicalSubarrayRows: %lld",
+					&maxPhysicalRowsPerSubarray);
+			continue;
+		}
+
+		if (!strncmp("-MaxPhysicalSubarrayColumns", line,
+				strlen("-MaxPhysicalSubarrayColumns"))) {
+			sscanf(line, "-MaxPhysicalSubarrayColumns: %lld",
+					&maxPhysicalColumnsPerSubarray);
 			continue;
 		}
 

@@ -17,6 +17,10 @@ class M3DResult:
     via_resistance_ohm: float
     via_capacitance_ff: float
     via_pitch_um: float
+    intrinsic_rc_latency_ns: float
+    driven_hop_latency_ns: float
+    interface_energy_fj_per_bit: float
+    via_switching_energy_fj_per_bit: float
     latency_penalty_ns: float
     energy_penalty_nj: float
     footprint_mm2: float
@@ -50,8 +54,17 @@ def evaluate_m3d(
     via_count_total = via_count_per_interface * interfaces
     average_hops = interfaces / 2.0
     hop_delay_s = 0.69 * (driver_r + 0.5 * r_via) * c_via_ff * 1e-15
-    latency_ns = average_hops * hop_delay_s * 1e9
-    energy_nj = average_hops * vertical_data_bits * c_via_ff * 1e-15 * vdd ** 2 * 1e9
+    intrinsic_ns = average_hops * hop_delay_s * 1e9
+    driven_hop_ns = float(values.get("driven_hop_latency_ps", 0.0)) * 1e-3
+    latency_ns = average_hops * max(hop_delay_s * 1e9, driven_hop_ns)
+    interface_energy_fj = float(values.get(
+        "interface_energy_fj_per_bit", 0.0
+    ))
+    via_energy_fj = c_via_ff * vdd ** 2
+    energy_nj = (
+        average_hops * vertical_data_bits
+        * (via_energy_fj + interface_energy_fj) / 1e6
+    )
     footprint_mm2 = via_count_total * pitch_um ** 2 / 1e6
     footprint_percent = (
         100.0 * footprint_mm2 / data_array_area_mm2
@@ -67,12 +80,18 @@ def evaluate_m3d(
         via_resistance_ohm=r_via,
         via_capacitance_ff=c_via_ff,
         via_pitch_um=pitch_um,
+        intrinsic_rc_latency_ns=intrinsic_ns,
+        driven_hop_latency_ns=driven_hop_ns,
+        interface_energy_fj_per_bit=interface_energy_fj,
+        via_switching_energy_fj_per_bit=via_energy_fj,
         latency_penalty_ns=latency_ns,
         energy_penalty_nj=energy_nj,
         footprint_mm2=footprint_mm2,
         footprint_percent_of_data_array=footprint_percent,
         model=(
-            "uniform tier access; Elmore 0.69*(Rdriver+Rvia/2)*Cvia per hop; "
-            "Cvia*Vdd^2 per transferred bit; dedicated via keep-out footprint"
+            "uniform tier access; reports intrinsic Elmore RC separately, but "
+            "critical latency uses max(intrinsic RC, measured driven-hop delay); "
+            "energy includes Cvia*Vdd^2 plus configurable interface energy; "
+            "footprint counts dedicated via landing/keep-out pitch"
         ),
     )

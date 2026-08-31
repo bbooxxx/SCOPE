@@ -1,61 +1,59 @@
-# SCOPE v5
+# SCOPE v6
 
-SCOPE 是构建在 DESTINY 之上的三级异质缓存行为级评估器。每层可独立选择器件、容量、相联度、bank、sense amplifier（SA）和 M3D tier 数；C++ 负责 OpenVLA 行为级 load/store trace 与 set-associative LRU 缓存，Python 负责调用 DESTINY、组合延迟/能耗/静态功耗并搜索 `1/(latency × power)` 最优设计。它用于架构筛选，不替代 RTL、SPICE 或真实 GPU trace。
+SCOPE 是构建在 DESTINY 之上的三级异质缓存行为级评估器。每层可独立配置器件、容量、相联度、bank、物理 subarray 上限、sense amplifier（SA）和 M3D tier 数；C++ 生成 OpenVLA Attention/FFN 的 load/store 行为 trace 并模拟 set-associative LRU 缓存，Python 组合 DESTINY 电路结果、阵列非理想效应、NoC、LPDDR、功耗和 `1/(latency×power)`。v6 把三层缓存和 LPDDR 传输统一为 128 B 行为级 cache line，与 GPU 的 128 B 对齐合并访存粒度一致。它用于早期架构筛选，不替代 SPICE、RTL 或 GPU 硬件 trace。
 
 ## 1. 构建与运行
 
 ```bash
-make -j4
+make clean && make -j4
 make test-scope
-
-# Attention 与 FFN 两次完整搜索
-make scope-v5
+make scope-v6
 ```
 
-主要目录：
-
-- `component/`：DESTINY 电路组件及新增的可审计 SA 输出。
+- `component/`：DESTINY 电路组件；v6 新增物理 subarray 行/列约束以及 RWL/RBL 电阻输出。
 - `model/`：C++ OpenVLA Attention/FFN 行为 trace 与三级缓存模拟。
-- `scope/`：Python 编排、器件库、SA/M3D overlay、功耗与 FoM。
-- `config/device_library_v5.json`：v5 单元库；`config/scope_v5.json`：Thor 等面积目标和候选空间。
+- `scope/`：Python 编排；`nonideal.py`、`sense_amp.py`、`m3d.py` 分别负责阵列非理想、SA 和三维互连。
+- `config/scope_v6.json`：v6 目标系统；`config/device_library_v6.json` 在 v5 单元库上只覆盖 v6 新参数，不改变历史 v5 语义。
 
-除本 README 外，仿真、数据和关键点 Markdown 均只保留在本地并由 Git 忽略。
+除本 README 外，仿真与关键点 Markdown 只保留本地并由 Git 忽略。
 
-## 2. v5 模型与本轮核查
+## 2. v6 建模
 
-### Thor 等面积三级缓存
+### 阵列非理想
 
-Thor TRM 给出每两个 SM 共享 256 KiB L1 data/shared memory；运行时报告给出 32 MiB GPU L2。SCOPE 保留 256 KiB SRAM L1，把 Thor 32 MiB SRAM L2 的 1/4 面积分给 TFET-eDRAM L2、3/4 分给四层 OSFET-eDRAM L3。按单元库的 4×/16× 密度，目标为：
+DESTINY 先选择 bank/mat/subarray，并输出实际 `Nrow/Ncol`、RWL/RBL 总电阻。Gain-cell eDRAM 使用：
 
-| 层 | 器件 | SRAM 等面积 | 实际容量 | DESTINY 电路代理 |
-|---|---|---:|---:|---:|
-| L1 | SRAM | 256 KiB | 256 KiB | 256 KiB |
-| L2 | TFET-eDRAM | 8 MiB | 32 MiB | 32 MiB |
-| L3 | 4-tier OSFET-eDRAM | 24 MiB | 384 MiB | 512 MiB |
+```text
+Ixtalk = Ion - (Nrow-1)Iunsel
+ΔVRWL = Ireal·RWL/2
+ΔVRBL = Ireal·RBL
+treal = CRBL·(ΔVsense+ΔVRBL)/Ireal
+PIR = Ireal²·(RWL/2+RBL)
+```
 
-L3 的 512 MiB 只用于满足 DESTINY 的 2 次幂容量约束；命中率、tag 数和单元静态功耗始终使用 384 MiB 架构容量。结构审计会同时报告两者，不把代理容量冒充实际容量。[Thor TRM](https://developer.download.nvidia.com/assets/embedded/secure/jetson/thor/docs/Thor-Soc-TRM_DP-11881-002_v1.1.pdf)、[Thor runtime L2](https://forums.developer.nvidia.com/t/jetson-thor-gpu-stuck-at-1-05ghz/346044)
+RWL 抬高远端 source/VSS，降低读管 `VGS`；模型用可配置 alpha-power 关系降额电流。2T0C 的 RWL/RBL/WWL 耦合严格按各自耦合电容占总 SN 电容的比例计算；互补 N/P 写读管允许用 mismatch fraction 表示上下拉抵消，n-only OSFET 不启用抵消。读串扰按题设 50 mV 偏置下的 `Iunsel` 逐行累加。有效 BER 用 `Q(Vmargin/σSA)` 做行为级估计，因此电流型和电压型 SA 的输入噪声/offset 可以分开配置。[2T gain-cell coupling](https://ieeexplore.ieee.org/document/10704707)、[16-nm gain-cell eDRAM](https://ieeexplore.ieee.org/document/9131838)
 
-### 命中率修正
+MRAM 使用同一条线阻路径求实际读电流和 `I²R`。STT read disturb 使用热激活翻转概率；若超过每次读取上限，限制的是**读电流**并增加读延迟，写电流/写延迟不变。降低写电流不能缓解一次 read disturb。[STT read-disturb model](https://people.ece.umn.edu/groups/VLSIresearch/papers/2014/DATE14_STTMRAM.pdf)、[STT-MRAM reliability](https://publikationen.bibliothek.kit.edu/1000070974/4207942)
 
-旧版把访问地址压入 24 MiB 抽样工作集，32 MiB L2 因而几乎包住所有复用，这是错误的先验。v5 按 OpenVLA-7B 一层的真实形状推导完整 BF16 地址域：Attention 为 `4H² + 6SH = 148,717,568 B`（141.83 MiB），FFN 为 `3HI + 2SH + 2SI = 288,355,328 B`（275.00 MiB），其中 `S=295, H=4096, I=11008`。C++ 在完整地址域生成 16-byte load/store，先 warmup 4,194,304 次，再统计 4,194,304 次；各级命中率的分母是“真正到达该级的请求”。
+### SA、M3D 与 NoC 修正
 
-该方法与 ChampSim 的 trace/warmup + set-associative 模拟口径一致；NVIDIA 也把 L2 hit rate 定义为到达 L2 的 sector 请求中命中的比例，并指出持久工作集超过可用 L2 时会 thrash。GPU ML 研究进一步报告，大多数 cache hit 来自 kernel 内复用，而非默认可由 L2 容纳整个模型层。[ChampSim](https://github.com/ChampSim/ChampSim/blob/master/docs/src/index.rst)、[Nsight Compute](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html)、[CUDA Best Practices](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html)、[MLArchSys/ISCA 2024](https://openreview.net/pdf?id=aYbb7xZuu6)
+Gain-cell 的 SN 控制独立读管，最终产生 RBL 放电电流，所以并非“只能 voltage sense”。电压型 SA 等待 `CRBL·ΔV/I` 形成电压差，输入阻抗高、参考和静态电流较简单；电流型 SA 用低输入阻抗钳位 RBL 并直接比较 cell/reference current，通常能更早判决、减小 RBL swing，但付出偏置功耗、current-mirror/reference mismatch。谁的准确率更高并非固定结论，取决于 `signal / input-referred noise`。v6 允许所有 gain-cell eDRAM 搜索两类 SA，并给 latency、energy、noise 三组独立参数。[Current-sense low-input-impedance principle](https://globals.ieice.org/en_transactions/electronics/10.1587/e79-c_8_1120/_p)、[current/voltage SA comparison](https://doi.org/10.1109/ICECA.2019.8822122)
 
-### SA 与 M3D
+DESTINY 原有 `currentSense` 实际是“查表 I–V converter + 同一个 voltage latch”：`SenseAmp.cpp` 给 converter 加固定延迟/能耗，随后仍执行 `tau·log(Vdd/Vsense)`。v6 会先剥离 converter，再施加独立 current/voltage 拓扑参数与准确率模型；因此它不再把 converter 开销误当成真正电流型 SA 本身。
 
-原 DESTINY 的 `current sense` 并不是独立电流型 SA：它在同一电压锁存器方程前串入按工艺节点查表的 I–V converter；读出模式由 memory cell 固定，不能按“层 × 器件”搜索。v5 将 converter 延迟、能量和泄漏单独输出并从共同 voltage-latch baseline 中剥离，再只对兼容器件搜索：SRAM/eDRAM 的电压/电荷读出使用 voltage SA，MRAM 的电阻读出可比较 current/voltage SA。当前行为级参数把 current SA 设为 0.6× latency、1.2× dynamic energy、2× gated standby leakage；它表达“更快但功耗更高”的设计方向，所有因子可配置，不宣称为电路签核值。[MRAM current/voltage comparison](https://pure.korea.ac.kr/en/publications/comparative-study-in-response-time-between-a-current-mode-and-a-v)、[STT-MRAM SA review](https://www.sciencedirect.com/science/article/pii/S0026269219300783)、[SRAM SA review](https://www.tandfonline.com/doi/abs/10.4103/0256-4602.107343)
+M3D 同时报告裸 MIV Elmore RC 与可驱动 hop。默认 `Rvia=5.5 Ω, Cvia=0.1 fF` 的裸 RC 只有 `0.00002098 ns`（4 tier 平均 1.5 hops），但 45-nm 4× inverter 驱动的 MIV 报告约 40 ps/hop，因此关键路径取二者较大值，4-tier L3 为 60 ps，而不是沿用不现实的 0.021 ps。能量包含 `Cvia·Vdd²` 与可配置接口能耗，面积按 landing/keep-out pitch 计数。[MIV physical parameters](https://iacomaweb.web.engr.illinois.edu/iacoma-papers/isca19_1.pdf)、[driven MIV delay](https://web.ece.ucsb.edu/~iakgun/files/DAC2019.pdf)
 
-M3D 评估器与器件名称解耦，任意层均可配置 tier 数。其平均垂直 hop 为 `(N-1)/2`，每 hop 延迟用 `0.69(Rdriver+Rvia/2)Cvia`，能量用 `bits·Cvia·Vdd²`，面积用 `via_count·pitch²`。默认 MIV 为 `R=5.5 Ω, C=0.1 fF, pitch=0.1 μm`；模型只覆盖通孔 RC/动态能量/keep-out footprint，不覆盖热、供电和制造良率。[MIV 参数](https://iacomaweb.web.engr.illinois.edu/iacoma-papers/isca19_1.pdf)、[DAC 2023 M3D review](https://www.gtcad.gatech.edu/www/papers/dac23-lingjun.pdf)、[IEDM 2024 archive](https://ieee-iedm.org/wp-content/uploads/2026/05/IEDM2024Archive.pdf)
+NoC 延迟按每方向 `hops·(router cycles+link cycles)/clock`，分别列出 64-bit 请求和 1024-bit cache-line 响应；能量分成 router 与 `pJ/bit/mm` 走线项。当前单请求 demo 不模拟排队，因此这不是拥塞上界。NVIDIA 官方文档说明 GPU 全局存储使用 32/64/128 B 对齐事务，并记录了 128 B cache line；v6 因此用 128 B 作为统一的架构粒度，但不假定真实 GPU 每个物理层级的 sector 都完全相同。[CUDA Programming Guide](https://docs.nvidia.com/cuda/archive/12.8.1/pdf/CUDA_C_Programming_Guide.pdf)、[BookSim](https://crd.lbl.gov/assets/pubs_presos/booksimispass.pdf)、[ORION 2.0](https://escholarship.org/uc/item/5jd3c1gv)
 
 ## 3. 已验证结果
 
-真实 workload 测得读比例为 Attention 95.07%、FFN 94.92%，不再固定为 3:1。SRAM 泄漏按工作簿的 27.5 pW/bit 计算，并显式加入 gated SA 和 SRAM tag 泄漏；目标设计的总静态功耗为 8.601 mW。
+Thor 等面积目标保持 `256 KiB SRAM / 32 MiB TFET-eDRAM / 384 MiB 4-tier OSFET-eDRAM`。v5 的 OSFET `4096×1024` 是 DESTINY 在只限制“每 mat 有几个 subarray”、却不限制物理行长时选出的 EDP 解；v6 在搜索阶段加入 `Nrow≤1024`，重新得到 `1024×512`，不是事后缩放。
 
-| workload | 完整工作集 | 条件 `R1 / R2 / R3` | LPDDR 到达率 | 平均延迟 | 平均功耗 | `1/(ns·mW)` |
+| workload | 实测读比例 | 条件 `R1 / R2 / R3` | LPDDR 到达率 | 平均延迟 | 平均功耗 | `1/(ns·mW)` |
 |---|---:|---:|---:|---:|---:|---:|
-| Attention | 141.83 MiB | 0.351541 / 0.200028 / 0.963217 | 0.019081 | 18.065 ns | 24.963 mW | 0.002217 |
-| FFN | 275.00 MiB | 0.359844 / 0.106118 / 0.966080 | 0.019410 | 19.423 ns | 25.784 mW | 0.001997 |
+| Attention | 95.072% | 0.359284 / 0.205038 / 0.963787 | 1.8445% | 16.345 ns | 39.071 mW | 0.001566 |
+| FFN | 94.921% | 0.363713 / 0.107241 / 0.966449 | 1.9059% | 17.712 ns | 40.977 mW | 0.001378 |
 
-两种 workload 的最优候选均为 `SRAM / TFET-eDRAM / OSFET-eDRAM`。以 Attention 为例，若 L3 改成 96 MiB TFET-eDRAM，L3 条件命中率只有 57.80%、片外到达率 21.89%；384 MiB OSFET-eDRAM 将其改善到 96.32% 和 1.91%。因此修正后 L3 的大容量确实发挥作用，而不是由 L2 预先包住复用数据。
+Attention 中，L2 的阵列非理想额外增加约 0.0444 ns；L3 增加约 0.7895 ns。L3 M3D 再增加 0.060 ns。L1/L2/L3 有效读延迟分别为 `1.000 / 1.762 / 20.996 ns`；所有 BER、variation、耐久和刷新约束均通过。23 个单元测试与 Attention/FFN 两次 128 B 完整仿真均通过。
 
-LPDDR 保持 v4 的 Jetson AGX Orin 口径：LPDDR5-6400、256-bit、204.8 GB/s，随机闭页行为延迟 67.5 ns，能耗 2.5 pJ/bit。[Orin Technical Brief](https://www.nvidia.com/content/dam/en-zz/Solutions/gtcf21/jetson-orin/nvidia-jetson-agx-orin-technical-brief.pdf)、[Ramulator2](https://github.com/CMU-SAFARI/ramulator2)、[DOE EES2 Roadmap](https://www.energy.gov/documents/energy-efficiency-scaling-two-decades-research-and-development-roadmap-draft)
+LPDDR 使用 Jetson AGX Orin 口径的 LPDDR5-6400：256-bit、204.8 GB/s、随机闭页行为延迟 67.5 ns、2.5 pJ/bit。[Orin Technical Brief](https://www.nvidia.com/content/dam/en-zz/Solutions/gtcf21/jetson-orin/nvidia-jetson-agx-orin-technical-brief.pdf)、[Ramulator2](https://github.com/CMU-SAFARI/ramulator2)

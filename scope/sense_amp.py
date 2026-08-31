@@ -27,6 +27,9 @@ class SenseAmpResult:
     legacy_iv_converter_leakage_mw: float
     hit_latency_delta_ns: float
     hit_energy_delta_nj: float
+    required_input_signal_mv: float
+    input_referred_noise_mv: float
+    accuracy_tradeoff: str
     model_factors: Dict[str, float]
     comparison_basis: str
 
@@ -89,11 +92,20 @@ def evaluate_sense_amp(
         legacy_iv_converter_leakage_mw=iv_leakage,
         hit_latency_delta_ns=selected_latency - raw_latency,
         hit_energy_delta_nj=selected_energy - raw_energy,
+        required_input_signal_mv=float(factors.get(
+            "required_input_signal_mv", 20.0 if selected == "current" else 50.0
+        )),
+        input_referred_noise_mv=float(factors.get(
+            "input_referred_noise_mv", 12.0 if selected == "current" else 8.0
+        )),
+        accuracy_tradeoff=str(factors.get(
+            "accuracy_tradeoff", "legacy library: default behavior-level SA noise"
+        )),
         model_factors={key: float(value) for key, value in factors.items()
                        if key.endswith("factor")},
         comparison_basis=(
             "DESTINY current mode = tabulated I-V converter + the same voltage "
-            "latch equation; SCOPE v5 instead compares explicit compatible "
-            "current/voltage topology variants against a converter-free baseline"
+            "latch equation; SCOPE removes that converter and compares explicit "
+            "current/voltage topology and input-noise variants against one baseline"
         ),
     )

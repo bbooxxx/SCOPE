@@ -27,6 +27,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tupl
 
 from .edram import RefreshResult, evaluate_read, evaluate_si_refresh, no_refresh
 from .m3d import evaluate_m3d
+from .nonideal import evaluate_nonideal
 from .openvla_trace import build_trace, repeated
 from .sense_amp import evaluate_sense_amp
 
@@ -89,6 +90,9 @@ class DestinyMetrics:
     rbl_wire_capacitance_ff: float = 0.0
     rbl_cell_capacitance_ff: float = 0.0
     rbl_length_um: float = 0.0
+    rwl_length_um: float = 0.0
+    rbl_resistance_ohm: float = 0.0
+    rwl_resistance_ohm: float = 0.0
     rbl_delay_ns: float = 0.0
     rbl_read_energy_nj: float = 0.0
     peripheral_read_latency_ns: float = 0.0
@@ -148,6 +152,7 @@ class LayerSpec:
     refresh: Optional[Dict[str, Any]] = None
     sense_amp: Optional[Dict[str, Any]] = None
     m3d: Optional[Dict[str, Any]] = None
+    nonideal: Optional[Dict[str, Any]] = None
     static_power_components: Optional[Dict[str, float]] = None
 
     @property
@@ -163,6 +168,15 @@ class CrossbarSpec:
     clock_ghz: float
     energy_pj_per_bit: float
     transaction_bits: int
+    topology: str = "legacy crossbar"
+    hops: int = 1
+    router_pipeline_cycles: float = 0.0
+    link_traversal_cycles: float = 0.0
+    request_bits: int = 0
+    response_bits: int = 0
+    router_energy_pj_per_bit: float = 0.0
+    link_energy_pj_per_bit_per_mm: float = 0.0
+    link_length_mm: float = 0.0
 
     @property
     def latency_ns(self) -> float:
@@ -170,7 +184,21 @@ class CrossbarSpec:
 
     @property
     def energy_nj(self) -> float:
+        if self.request_bits > 0 and self.response_bits > 0:
+            per_bit = (
+                self.router_energy_pj_per_bit
+                + self.link_energy_pj_per_bit_per_mm * self.link_length_mm
+            )
+            return self.hops * (self.request_bits + self.response_bits) * per_bit / 1000.0
         return self.energy_pj_per_bit * self.transaction_bits / 1000.0
+
+    @property
+    def request_latency_ns(self) -> float:
+        return self.request_cycles / self.clock_ghz
+
+    @property
+    def response_latency_ns(self) -> float:
+        return self.response_cycles / self.clock_ghz
 
 
 @dataclass(frozen=True)
@@ -532,6 +560,15 @@ class DestinyRunner:
             rbl_length_um=DestinyRunner._number(
                 text, "SCOPE Selected RBL Length", optional=True
             ),
+            rwl_length_um=DestinyRunner._number(
+                text, "SCOPE Selected RWL Length", optional=True
+            ),
+            rbl_resistance_ohm=DestinyRunner._number(
+                text, "SCOPE Selected RBL Resistance", optional=True
+            ),
+            rwl_resistance_ohm=DestinyRunner._number(
+                text, "SCOPE Selected RWL Resistance", optional=True
+            ),
             rbl_delay_ns=DestinyRunner._number(
                 text, "SCOPE Selected RBL Delay", optional=True
             ),
@@ -845,6 +882,7 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
     models = model_library or {}
     sense_amp_result: Optional[Dict[str, Any]] = None
     m3d_result: Optional[Dict[str, Any]] = None
+    nonideal_result: Optional[Dict[str, Any]] = None
     static_components = {"data_cells_mw": device_leakage_mw}
     effective_values = asdict(effective_metrics)
     if "sense_amplifier" in entry and "sense_amplifier_models" in models:
@@ -870,6 +908,20 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
         )
         static_components["sense_amplifiers_mw"] = \
             evaluated_sa.selected_leakage_mw
+
+    evaluated_nonideal = evaluate_nonideal(
+        raw_metrics,
+        float(effective_values["hit_latency_ns"]),
+        line_bytes * 8,
+        entry,
+        sense_amp_result,
+        float(raw["ber"]),
+    )
+    nonideal_result = evaluated_nonideal.to_dict()
+    effective_values["hit_latency_ns"] += \
+        evaluated_nonideal.read_latency_penalty_ns
+    effective_values["hit_energy_nj"] += \
+        evaluated_nonideal.read_energy_penalty_nj
 
     m3d_cfg = raw.get("m3d", {})
     if m3d_cfg or models.get("m3d_defaults"):
@@ -926,7 +978,7 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
         banks=banks,
         peripheral_latency_ns=float(raw.get("peripheral_latency_ns", 0.0)),
         peripheral_energy_nj=float(raw.get("peripheral_energy_nj", 0.0)),
-        ber=float(raw["ber"]),
+        ber=evaluated_nonideal.effective_ber,
         ber_max=float(raw.get("ber_max", global_ber_max)),
         allow_high_variation=bool(raw.get("allow_high_variation", False)),
         endurance_writes_per_line=float(endurance),
@@ -949,26 +1001,62 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
         refresh=refresh_result,
         sense_amp=sense_amp_result,
         m3d=m3d_result,
+        nonideal=nonideal_result,
         static_power_components=static_components,
     )
 
 
 def build_crossbar(raw: Dict[str, Any]) -> CrossbarSpec:
+    hops = int(raw.get("hops", 1))
+    router_cycles = float(raw.get("router_pipeline_cycles", 0.0))
+    link_cycles = float(raw.get("link_traversal_cycles", 0.0))
+    detailed = router_cycles > 0.0 or link_cycles > 0.0
+    directional_cycles = hops * (router_cycles + link_cycles)
+    request_bits = int(raw.get("request_bits", 0))
+    response_bits = int(raw.get("response_bits", 0))
+    transaction_bits = int(raw.get(
+        "transaction_bits", request_bits + response_bits
+    ))
     spec = CrossbarSpec(
         name=str(raw["name"]),
-        request_cycles=float(raw.get("request_cycles", 1.0)),
-        response_cycles=float(raw.get("response_cycles", 1.0)),
+        request_cycles=(directional_cycles if detailed else
+                        float(raw.get("request_cycles", 1.0))),
+        response_cycles=(directional_cycles if detailed else
+                         float(raw.get("response_cycles", 1.0))),
         clock_ghz=float(raw.get("clock_ghz", 1.0)),
         energy_pj_per_bit=float(raw.get("energy_pj_per_bit", 0.201)),
-        transaction_bits=int(raw["transaction_bits"]),
+        transaction_bits=transaction_bits,
+        topology=str(raw.get("topology", "legacy crossbar")),
+        hops=hops,
+        router_pipeline_cycles=router_cycles,
+        link_traversal_cycles=link_cycles,
+        request_bits=request_bits,
+        response_bits=response_bits,
+        router_energy_pj_per_bit=float(raw.get("router_energy_pj_per_bit", 0.0)),
+        link_energy_pj_per_bit_per_mm=float(
+            raw.get("link_energy_pj_per_bit_per_mm", 0.0)
+        ),
+        link_length_mm=float(raw.get("link_length_mm", 0.0)),
     )
     require(spec.request_cycles >= 0.0 and spec.response_cycles >= 0.0,
             f"{spec.name}: crossbar cycles must be non-negative")
+    require(spec.hops >= 0, f"{spec.name}: hops must be non-negative")
+    require(spec.router_pipeline_cycles >= 0.0 and
+            spec.link_traversal_cycles >= 0.0,
+            f"{spec.name}: detailed NoC cycles must be non-negative")
     require(spec.clock_ghz > 0.0, f"{spec.name}: clock_ghz must be positive")
     require(spec.energy_pj_per_bit >= 0.0,
             f"{spec.name}: energy_pj_per_bit must be non-negative")
+    require(spec.transaction_bits >= 0 and spec.request_bits >= 0 and
+            spec.response_bits >= 0,
+            f"{spec.name}: transaction widths must be non-negative")
+    require(spec.router_energy_pj_per_bit >= 0.0 and
+            spec.link_energy_pj_per_bit_per_mm >= 0.0 and
+            spec.link_length_mm >= 0.0,
+            f"{spec.name}: detailed NoC energy parameters must be non-negative")
     require(spec.transaction_bits > 0,
             f"{spec.name}: transaction_bits must be positive")
+    require(spec.hops > 0, f"{spec.name}: hops must be positive")
     return spec
 
 
@@ -1479,6 +1567,25 @@ class ScopeModel:
                 "limit": layer.ber_max,
                 "pass": layer.ber <= layer.ber_max,
             })
+            nonideal = layer.nonideal or {}
+            disturb_target = float(
+                nonideal.get("read_disturb_target_per_read", 0.0)
+            )
+            if disturb_target > 0.0:
+                disturb_value = float(
+                    nonideal.get("read_disturb_probability_per_read", 0.0)
+                )
+                results.append({
+                    "layer": layer.name,
+                    "constraint": "STT read-disturb probability/read",
+                    "value": disturb_value,
+                    "limit": disturb_target,
+                    "pass": disturb_value <= disturb_target * (1.0 + 1e-9),
+                    "detail": (
+                        "The limiter reduces read current when necessary; write "
+                        "current and write latency are not altered."
+                    ),
+                })
             high_variation = "high" in str(
                 layer.device_library_entry["variation"]
             ).lower()
@@ -1594,6 +1701,7 @@ class ScopeModel:
         else:
             sa = layer.sense_amp or {}
             m3d = layer.m3d or {}
+            nonideal = layer.nonideal or {}
             edram = layer.edram_read or {}
             selected_sa = str(sa.get("selected_type", raw.native_sense_amp_type
                                      or "voltage"))
@@ -1608,6 +1716,9 @@ class ScopeModel:
                 max(0.0, raw.data_predecoder_latency_ns
                     + raw.data_row_decoder_latency_ns),
                 max(0.0, cell_latency),
+                max(0.0, float(nonideal.get(
+                    "read_latency_penalty_ns", 0.0
+                ))),
                 max(0.0, float(sa.get(
                     "selected_latency_ns", raw.sense_amp_latency_ns
                 ))),
@@ -1624,6 +1735,9 @@ class ScopeModel:
                 0.20 * peripheral_energy,
                 0.25 * peripheral_energy,
                 max(0.0, raw.rbl_read_energy_nj),
+                max(0.0, float(nonideal.get(
+                    "read_energy_penalty_nj", 0.0
+                ))),
                 max(0.0, float(sa.get(
                     "selected_energy_nj", raw.sense_amp_read_energy_nj
                 ))),
@@ -1636,6 +1750,7 @@ class ScopeModel:
                 f"{layer.name} bank routing",
                 f"{layer.name} predecoder + row decoder/wordline",
                 f"{layer.name} cell discharge + RBL",
+                f"{layer.name} array IR/coupling/crosstalk penalty",
                 f"{layer.name} {selected_sa} sense amplifier",
                 f"{layer.name} column mux + precharge/output",
                 f"{layer.name} M3D vertical links",
@@ -1764,6 +1879,31 @@ def load_json(path: Path) -> Dict[str, Any]:
         raise ScopeError(f"failed to load JSON config {path}: {exc}") from exc
     require(isinstance(data, dict), "top-level SCOPE config must be an object")
     return data
+
+
+def _deep_merge(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any]:
+    result = copy.deepcopy(base)
+    for key, value in overlay.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def load_model_library(path: Path, repo_root: Optional[Path] = None) -> Dict[str, Any]:
+    """Load a device library and recursively apply an optional base overlay."""
+    resolved = path.resolve()
+    raw = load_json(resolved)
+    base_name = raw.pop("extends", None)
+    if base_name is None:
+        return raw
+    root = repo_root or resolved.parent
+    base_path = Path(str(base_name))
+    if not base_path.is_absolute():
+        candidate = resolved.parent / base_path
+        base_path = candidate if candidate.exists() else root / base_path
+    return _deep_merge(load_model_library(base_path, root), raw)
 
 
 def select_workload(raw: Dict[str, Any], requested: Optional[str]) -> Dict[str, Any]:
@@ -1935,6 +2075,19 @@ def _generate_destiny_config(
         1 if bool(layer.get("m3d", {}).get("enabled", False))
         else int(layer.get("stacked_tiers", 1))
     )
+    array_limits = layer.get("array_limits", {})
+    require(isinstance(array_limits, dict),
+            f"{layer['name']}: array_limits must be an object")
+    if "max_subarray_rows" in array_limits:
+        text += (
+            f"\n-MaxPhysicalSubarrayRows: "
+            f"{int(array_limits['max_subarray_rows'])}\n"
+        )
+    if "max_subarray_columns" in array_limits:
+        text += (
+            f"-MaxPhysicalSubarrayColumns: "
+            f"{int(array_limits['max_subarray_columns'])}\n"
+        )
     generated_dir = repo_root / "config" / ".scope-cache"
     generated_dir.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^a-z0-9]+", "_", str(layer["device"]).lower()).strip("_")
@@ -2210,6 +2363,7 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
             "refresh_equation": layer.refresh,
             "sense_amplifier": layer.sense_amp,
             "m3d": layer.m3d,
+            "array_nonideal": layer.nonideal,
             "static_power_components": layer.static_power_components,
             "geometry_audit": geometry_audit(layer),
             "latency_audit": {
@@ -2223,6 +2377,9 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
                 "sense_amp_delta_ns": (
                     layer.sense_amp or {}
                 ).get("hit_latency_delta_ns", 0.0),
+                "array_nonideal_penalty_ns": (
+                    layer.nonideal or {}
+                ).get("read_latency_penalty_ns", 0.0),
                 "m3d_penalty_ns": (
                     layer.m3d or {}
                 ).get("latency_penalty_ns", 0.0),
@@ -2230,7 +2387,8 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
                 "interpretation": (
                     "For equation-based eDRAM, SCOPE replaces only DESTINY's "
                     "selected RBL delay with C_RBL*deltaV/Ion and retains "
-                    "peripheral/tag timing, then applies SA and M3D deltas."
+                    "peripheral/tag timing, then applies SA, array-nonideal, and "
+                    "M3D deltas."
                 ),
             },
             "raw_destiny_metrics": asdict(layer.raw_metrics),
@@ -2255,6 +2413,22 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
             "clock_ghz": item.clock_ghz,
             "energy_pj_per_bit": item.energy_pj_per_bit,
             "transaction_bits": item.transaction_bits,
+            "topology": item.topology,
+            "hops": item.hops,
+            "router_pipeline_cycles": item.router_pipeline_cycles,
+            "link_traversal_cycles": item.link_traversal_cycles,
+            "request_bits": item.request_bits,
+            "response_bits": item.response_bits,
+            "request_latency_ns": item.request_latency_ns,
+            "response_latency_ns": item.response_latency_ns,
+            "router_energy_pj_per_bit": item.router_energy_pj_per_bit,
+            "link_energy_pj_per_bit_per_mm": item.link_energy_pj_per_bit_per_mm,
+            "link_length_mm": item.link_length_mm,
+            "model_basis": (
+                "BookSim-style hop/cycle latency plus ORION-style router and "
+                "wire dynamic-energy decomposition; no queueing is modeled in "
+                "this single-request behavior demo."
+            ),
         }
         for item in crossbars
     ]
@@ -2399,7 +2573,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         library_path = _resolve_path(
             repo_root, str(raw.get("device_library", "config/device_library.json"))
         )
-        library_raw = load_json(library_path)
+        library_raw = load_model_library(library_path, repo_root)
         device_library = library_raw.get("devices")
         require(isinstance(device_library, dict) and device_library,
                 "device library must contain a non-empty devices object")
