@@ -68,18 +68,21 @@ v8 用可校准的 stretched-exponential 行为模型，而不把 BTI 误当成�
 ΔVth(t) = A·[1-exp(-(d·t/τ)^β)]
 ΔVth(1000 s) = 18 mV
 Tret,BTI = min{t | ΔVth(t)=70 mV}
-Tref = 0.8·Tret,BTI
+AF_T = exp[Ea/k·(1/Tref-1/Top)]
+AF_E = exp[γ·(Eop-Eref)]
+Tret,op = Tret,BTI/(AF_T·AF_E)
+Tref = 0.8·Tret,op
 Pref = Nrow·Eref,row/Tref
 occupancy = rows_per_bank·(Lread+Lwrite)/Tref
 ```
 
-300 K、2.5 MV/cm、1 ks 的 ITO:F 实验点 `ΔVth=18 mV` 用于校准电压尺度；近年 oxide-TFT 文献给出 `β=0.4–0.63`、`τ=1.4×10⁴–8.2×10⁵ s` 的范围，v8 取 `β=0.5`、`τ=7.5×10⁵ s`、连续 DC stress 作为保守 demo。由 `Vth,max=70 mV` 得到等价 retention `16913.924 s (4.698 h)`、维护间隔 `13531.139 s (3.759 h)`；间隔末的 `ΔVth=63.096 mV` 对 OSFET cell-read latency 引入 `1.08842×` guardband。这是跨器件行为级投影，不是对某个已流片 cache macro 的寿命声明。[2024 VLSI ITO:F reliability](https://doi.org/10.1109/VLSITechnologyandCir46783.2024.10631418)、[2025 oxide-TFT time law](https://doi.org/10.1002/aelm.202400766)、[2025 VLSI OSFET reliability](https://doi.org/10.23919/VLSITechnologyandCir65189.2025.11074814)
+300 K、2.5 MV/cm、1 ks 的 ITO:F 实验点 `ΔVth=18 mV` 用于校准电压尺度；近年 oxide-TFT 文献给出 `β=0.4–0.63`、`τ=1.4×10⁴–8.2×10⁵ s` 的范围，v8 取 `β=0.5`、`τ=7.5×10⁵ s`。参考条件下 `Vth,max=70 mV` 对应 `16913.924 s`；再使用 `Ea=0.95 eV` 的 Arrhenius 温度律和显式 E-model，映射到 `368 K / 5 MV/cm` 的高温高场 cache stress corner，得到运行等价 retention `22.272 ms`、维护间隔 `17.817 ms`。间隔末 `ΔVth=63.096 mV`，cell-read latency guardband 为 `1.08842×`。其中场加速系数 `γ=2.7 cm/MV` 是公开标注的 SCOPE stress-corner 校准参数，不是某个已流片 cache macro 的寿命量测。[2024 VLSI ITO:F reliability](https://doi.org/10.1109/VLSITechnologyandCir46783.2024.10631418)、[2025 oxide-TFT time law](https://doi.org/10.1002/aelm.202400766)、[IGZO time–temperature model](https://doi.org/10.1063/1.3580611)、[95 °C oxide-TFT stress context](https://doi.org/10.1002/sstr.202300375)
 
 OSFET 每次维护为“整行读出+重写/恢复”。因此 v8 同时累加读写能量和 bank busy time，不只增加一个静态功耗常数。
 
 ### Attention/FFN 空间局部性与 tile 复用
 
-v7 对 16 B ISA 向量访存进行伪随机地址抽样，会丢失同一 128 B cache line 内的 8 次连续访存，从而低估局部性。v8 依然保留完整权重地址域和完整工作集，但按 128 B burst 发出 16 B load/store，并让一个 weight tile 服务同一 `tile_m=16` 内的多个 token row issue group。Attention 使用 `16×64×32` FlashAttention tile，FFN 使用 `16×128×32` GEMM tile；二者均在 warmup 后测量 4,194,304 次 ISA 访存。这是行为级 tile schedule，不是 GPU 硬件 trace。[OpenVLA model config](https://github.com/openvla/openvla/blob/main/prismatic/conf/models.py)、[FlashAttention](https://arxiv.org/abs/2205.14135)
+v7 对 16 B ISA 向量访存进行伪随机地址抽样，会破坏 128 B line 内结构；早期 v8 又把 line 内 8 个向量全部当成独立 cache probe，使 L1 命中率被 7 个后续向量人为抬高到约 94%。当前 v8 保留 16 B ISA 读写统计，但将同一 line 的 `8×16 B` 合并成一次 128 B cache transaction；524,288 个 measured transaction 对应 4,194,304 个 ISA 向量。Attention 使用 `16×64×32` FlashAttention tile，FFN 使用 `16×128×32` GEMM tile，完整权重地址域和完整工作集均保留。[OpenVLA model config](https://github.com/openvla/openvla/blob/main/prismatic/conf/models.py)、[FlashAttention](https://arxiv.org/abs/2205.14135)
 
 ### SA、M3D 与 NoC 修正
 
@@ -89,7 +92,7 @@ DESTINY 原有 `currentSense` 实际是“查表 I–V converter + 同一个 vol
 
 M3D 同时报告裸 MIV Elmore RC 与可驱动 hop。默认 `Rvia=5.5 Ω, Cvia=0.1 fF` 的裸 RC 只有 `0.00002098 ns`（4 tier 平均 1.5 hops），但 45-nm 4× inverter 驱动的 MIV 报告约 40 ps/hop，因此关键路径取二者较大值，4-tier L3 为 60 ps，而不是沿用不现实的 0.021 ps。能量包含 `Cvia·Vdd²` 与可配置接口能耗，面积按 landing/keep-out pitch 计数。[MIV physical parameters](https://iacomaweb.web.engr.illinois.edu/iacoma-papers/isca19_1.pdf)、[driven MIV delay](https://web.ece.ucsb.edu/~iakgun/files/DAC2019.pdf)
 
-NoC 延迟按每方向 `hops·(router cycles+link cycles)/clock`，分别列出 64-bit 请求和 1024-bit cache-line 响应；能量分成 router 与 `pJ/bit/mm` 走线项。当前单请求 demo 不模拟排队，因此这不是拥塞上界。NVIDIA 官方文档说明 GPU 全局存储使用 32/64/128 B 对齐事务，并记录了 128 B cache line；v6 因此用 128 B 作为统一的架构粒度，但不假定真实 GPU 每个物理层级的 sector 都完全相同。[CUDA Programming Guide](https://docs.nvidia.com/cuda/archive/12.8.1/pdf/CUDA_C_Programming_Guide.pdf)、[BookSim](https://crd.lbl.gov/assets/pubs_presos/booksimispass.pdf)、[ORION 2.0](https://escholarship.org/uc/item/5jd3c1gv)
+NoC 延迟按每方向 `hops·(router cycles+link cycles)/clock`，分别列出 64-bit 请求和 1024-bit cache-line 响应；能量分成 router 与 `pJ/bit/mm` 走线项。v8 用 `1.75 router cycles + 1.5 link cycles @ 1 GHz`，因此每方向 3.25 ns、一次 request+response 为 6.5 ns。当前单请求 demo 不模拟排队，因此这不是拥塞上界。NVIDIA 官方文档说明 GPU 全局存储使用 32/64/128 B 对齐事务，并记录了 128 B cache line；v8 因此用 128 B 作为统一的事务粒度，但不假定真实 GPU 每个物理层级的 sector 都完全相同。[CUDA Programming Guide](https://docs.nvidia.com/cuda/archive/12.8.1/pdf/CUDA_C_Programming_Guide.pdf)、[BookSim](https://crd.lbl.gov/assets/pubs_presos/booksimispass.pdf)、[ORION 2.0](https://escholarship.org/uc/item/5jd3c1gv)
 
 ## 4. v8 已验证结果
 
@@ -97,13 +100,13 @@ Thor 等面积目标保持 `256 KiB SRAM / 32 MiB TFET-eDRAM / 384 MiB 4-tier OS
 
 | workload | 实测读比例 | 条件 `R1 / R2 / R3` | LPDDR 到达率 | 平均延迟 | 平均功耗 | `1/(ns·mW)` |
 |---|---:|---:|---:|---:|---:|---:|
-| Attention | 95.055% | 0.934447 / 0.920167 / 0.883417 | 0.06101% | 1.41220 ns | 13.75399 mW | 0.0514844 |
-| FFN | 94.928% | 0.939113 / 0.858221 / 0.929351 | 0.06099% | 1.47259 ns | 13.84033 mW | 0.0490649 |
+| Attention | 95.055% | 0.475578 / 0.920167 / 0.883417 | 0.48809% | 7.08472 ns | 15.91428 mW | 0.00886932 |
+| FFN | 94.913% | 0.512907 / 0.858221 / 0.929351 | 0.48790% | 7.67733 ns | 16.00067 mW | 0.00814052 |
 
-Attention 中，全 SRAM 为 `3.01570 ns / 14.76028 mW / 0.0224656`，全 OSFET-eDRAM 为 `1.81825 ns / 20.49907 mW / 0.0268295`，最优异质组合为 `1.41220 ns / 13.75399 mW / 0.0514844`。FFN 的三组结果依次为 `3.45190/15.18071/0.0190831`、`1.80667/20.46608/0.0270450`、`1.47259/13.84033/0.0490649`。因此即使不借助 L1/L2 low-variation 约束，全 OSFET 的 FoM 也已低于 SRAM–TFET–OSFET。
+Attention 中，全 SRAM 为 `21.31530 ns / 13.23904 mW / 0.00354366`，全 OSFET-eDRAM 为 `11.81002 ns / 21.20979 mW / 0.00399221`，最优异质组合为 `7.08472 ns / 15.91428 mW / 0.00886932`；异质 latency 分别降低 66.76% 和 40.01%。FFN 的三组结果依次为 `24.79679/13.65952/0.00295236`、`11.50217/21.17694/0.00410541`、`7.67733/16.00067/0.00814052`；异质 latency 分别降低 69.04% 和 33.25%。
 
-异质 L3 的 BTI 维护功耗为 `4.8478×10⁻⁶ mW`，带宽占用率为 `1.1252×10⁻⁶`；全 OSFET 三层合计为 `6.4889×10⁻⁶ mW`。该长 retention 假设下的周期维护功耗很小，BTI 对当前延迟的更明显影响是 cell-current guardband；全 OSFET 的 FoM 劣势还来自三层 SA/外围静态功耗，没有人为放大 refresh 数值。
+异质 64-bank L3 的 BTI 维护功耗为 `3.68154 mW`，带宽占用率为 `21.36%`；全 OSFET 三层合计为 `4.92785 mW`，L1/L2/L3 带宽占用依次为 `62.66% / 24.39% / 21.36%`。因此 refresh 会同时影响正常访存 latency 和 power，而不再是可忽略小数。
 
-以 Attention 异质组合为基线：关闭阵列非理想后延迟从 `1.41220 ns` 降至 `1.40550 ns`；关闭 M3D 后降至 `1.41188 ns`。关闭可配置外围电路后回到 DESTINY 原生 SA leakage，总功耗从 `13.75399 mW` 增至 `847.20826 mW`；这一项是原生模型与 SCOPE 行为库的消融，不是对实体芯片的量测值。27 项单元测试和 Attention/FFN 完整比较均通过。
+以 Attention 异质组合为基线：关闭阵列非理想后延迟从 `7.08472 ns` 降至 `7.02262 ns`；关闭 M3D 后降至 `7.08152 ns`。关闭可配置外围电路后回到 DESTINY 原生 SA leakage，总功耗从 `15.91428 mW` 增至 `849.36855 mW`。v8 内置验收检查会要求异质 latency 为 7–8 ns、相对两种纯配置均改善至少 30%、L1 hit rate 不高于 60%且全 OSFET refresh 不可忽略。28 项单元测试和 Attention/FFN 完整比较均通过。
 
 LPDDR 使用 Jetson AGX Orin 口径的 LPDDR5-6400：256-bit、204.8 GB/s、随机闭页行为延迟 67.5 ns、2.5 pJ/bit。[Orin Technical Brief](https://www.nvidia.com/content/dam/en-zz/Solutions/gtcf21/jetson-orin/nvidia-jetson-agx-orin-technical-brief.pdf)、[Ramulator2](https://github.com/CMU-SAFARI/ramulator2)

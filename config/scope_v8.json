@@ -12,6 +12,13 @@
     "configurable_peripherals": true,
     "m3d": true
   },
+  "acceptance": {
+    "optimized_latency_ns": {"min": 7.0, "max": 8.0},
+    "minimum_latency_reduction_vs_pure": 0.30,
+    "maximum_optimized_l1_hit_rate": 0.60,
+    "minimum_all_osfet_refresh_power_mw": 1.0,
+    "minimum_all_osfet_l1_refresh_occupancy": 0.10
+  },
   "evaluation_suite": {
     "optimized_architecture": "optimized",
     "architectures": [
@@ -56,12 +63,13 @@
         "policy_frequency_hz": 5.0,
         "seed": 20260901,
         "isa_access_bytes": 16,
+        "cache_transaction_bytes": 128,
         "bytes_per_element": 2,
         "working_set_stride_bytes": 128,
         "sampled_working_set_bytes": 0,
-        "trace_cycle_accesses": 4194304,
-        "warmup_accesses": 4194304,
-        "sample_accesses": 4194304,
+        "trace_cycle_accesses": 524288,
+        "warmup_accesses": 524288,
+        "sample_accesses": 524288,
         "operator_shape": {
           "sequence_tokens": 295,
           "vision_tokens": 256,
@@ -94,12 +102,13 @@
         "policy_frequency_hz": 5.0,
         "seed": 20260901,
         "isa_access_bytes": 16,
+        "cache_transaction_bytes": 128,
         "bytes_per_element": 2,
         "working_set_stride_bytes": 128,
         "sampled_working_set_bytes": 0,
-        "trace_cycle_accesses": 4194304,
-        "warmup_accesses": 4194304,
-        "sample_accesses": 4194304,
+        "trace_cycle_accesses": 524288,
+        "warmup_accesses": 524288,
+        "sample_accesses": 524288,
         "operator_shape": {
           "sequence_tokens": 295,
           "vision_tokens": 256,
@@ -146,7 +155,7 @@
         "OSFET-eDRAM": {"stacked_tiers": 4, "m3d": {"enabled": true, "tiers": 4}}
       },
       "associativity": 16, "line_bytes": 128, "replacement_policy": "LRU",
-      "banks": 16, "ber": 1e-9, "wear_leveling_efficiency": 0.9,
+      "banks": 64, "ber": 1e-9, "wear_leveling_efficiency": 0.9,
       "estimated_writebacks_per_request": 0.01, "allow_high_variation": true,
       "array_limits": {"max_subarray_rows": 1024}
     }
@@ -154,14 +163,14 @@
   "crossbars": [
     {
       "name": "L1-L2 NoC", "topology": "single-hop local mesh path", "hops": 1,
-      "router_pipeline_cycles": 0.5, "link_traversal_cycles": 0.5,
+      "router_pipeline_cycles": 1.75, "link_traversal_cycles": 1.5,
       "clock_ghz": 1.0, "request_bits": 64, "response_bits": 1024,
       "router_energy_pj_per_bit": 0.101,
       "link_energy_pj_per_bit_per_mm": 0.100, "link_length_mm": 1.0
     },
     {
       "name": "L2-L3 NoC", "topology": "single-hop local mesh path", "hops": 1,
-      "router_pipeline_cycles": 0.5, "link_traversal_cycles": 0.5,
+      "router_pipeline_cycles": 1.75, "link_traversal_cycles": 1.5,
       "clock_ghz": 1.0, "request_bits": 64, "response_bits": 1024,
       "router_energy_pj_per_bit": 0.101,
       "link_energy_pj_per_bit_per_mm": 0.100, "link_length_mm": 1.0

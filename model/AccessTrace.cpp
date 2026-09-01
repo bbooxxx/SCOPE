@@ -27,9 +27,14 @@ AccessTrace::AccessTrace(TraceConfig config) : config_(std::move(config)) {
     if (config_.operator_name != "attention" && config_.operator_name != "ffn") {
         throw std::invalid_argument("operator must be attention or ffn");
     }
+    if (config_.transaction_bytes == 0) {
+        config_.transaction_bytes = config_.access_bytes;
+    }
     if (config_.access_bytes == 0 || config_.bytes_per_element == 0 ||
+        config_.transaction_bytes < config_.access_bytes ||
+        config_.transaction_bytes % config_.access_bytes != 0 ||
         config_.cache_line_bytes == 0 ||
-        config_.cache_line_bytes % config_.access_bytes != 0 ||
+        config_.cache_line_bytes % config_.transaction_bytes != 0 ||
         config_.working_set_stride_bytes == 0 ||
         config_.working_set_stride_bytes % config_.access_bytes != 0) {
         throw std::invalid_argument("invalid access geometry");
@@ -83,9 +88,9 @@ AccessTrace::AccessTrace(TraceConfig config) : config_(std::move(config)) {
     if (stream_lines == 0) {
         throw std::invalid_argument("sampled working set is too small");
     }
-    const std::uint64_t vectors_per_line =
-        config_.cache_line_bytes / config_.access_bytes;
-    cycle_accesses_ = stream_lines * 4 * vectors_per_line;
+    const std::uint64_t transactions_per_line =
+        config_.cache_line_bytes / config_.transaction_bytes;
+    cycle_accesses_ = stream_lines * 4 * transactions_per_line;
     if (config_.cycle_access_cap > 0) {
         cycle_accesses_ = std::min(cycle_accesses_, config_.cycle_access_cap);
     }
@@ -107,15 +112,16 @@ Access AccessTrace::at(std::uint64_t ordinal) const {
     const std::uint64_t stream_lines = stream_bytes / config_.cache_line_bytes;
     const std::uint64_t cycle_ordinal = ordinal % cycle_accesses_;
     const std::uint64_t epoch = ordinal / cycle_accesses_;
-    const std::uint64_t vectors_per_line =
-        config_.cache_line_bytes / config_.access_bytes;
-    const std::uint64_t line_group = cycle_ordinal / vectors_per_line;
-    const std::uint64_t vector_in_line = cycle_ordinal % vectors_per_line;
+    const std::uint64_t transactions_per_line =
+        config_.cache_line_bytes / config_.transaction_bytes;
+    const std::uint64_t line_group = cycle_ordinal / transactions_per_line;
+    const std::uint64_t transaction_in_line =
+        cycle_ordinal % transactions_per_line;
     const std::uint64_t weight_tile_reuse = std::max<std::uint64_t>(
         1, std::min<std::uint64_t>(4, config_.tile_m / 8));
     const std::uint64_t tile_group = line_group / weight_tile_reuse;
     const std::uint64_t cycle_line_groups =
-        (cycle_accesses_ + vectors_per_line - 1) / vectors_per_line;
+        (cycle_accesses_ + transactions_per_line - 1) / transactions_per_line;
     const std::uint64_t operation_rank =
         permute(line_group, cycle_line_groups, 0x0F0U);
     const std::uint64_t load_quota = std::min(
@@ -126,10 +132,10 @@ Access AccessTrace::at(std::uint64_t ordinal) const {
     const std::uint64_t lane = permute(tile_group, 3, 0x1A2U);
     const std::uint64_t offset_a =
         permute(tile_group, stream_lines, 0xA11U) * config_.cache_line_bytes +
-        vector_in_line * config_.access_bytes;
+        transaction_in_line * config_.transaction_bytes;
     const std::uint64_t offset_b =
         permute(tile_group, stream_lines, 0xB22U) * config_.cache_line_bytes +
-        vector_in_line * config_.access_bytes;
+        transaction_in_line * config_.transaction_bytes;
 
     const std::uint64_t activation_bytes = std::max<std::uint64_t>(
         64 * 1024,
@@ -159,30 +165,30 @@ Access AccessTrace::at(std::uint64_t ordinal) const {
                                        : kStateBase;
         return {Operation::kStore,
                 base + output_line * config_.cache_line_bytes +
-                    vector_in_line * config_.access_bytes,
-                config_.access_bytes};
+                    transaction_in_line * config_.transaction_bytes,
+                config_.transaction_bytes};
     }
     if (lane == 0) {
         const std::uint64_t activation_line =
             (line_group / activation_reuse) % activation_lines;
         return {Operation::kLoad,
                 kActivationBase + activation_line * config_.cache_line_bytes +
-                    vector_in_line * config_.access_bytes,
-                config_.access_bytes};
+                    transaction_in_line * config_.transaction_bytes,
+                config_.transaction_bytes};
     }
     if (lane == 1) {
         if (line_group % 64 == 0) {
             return {Operation::kLoad,
                     kColdStreamBase + epoch * stream_bytes + offset_a,
-                    config_.access_bytes};
+                    config_.transaction_bytes};
         }
-        return {Operation::kLoad, kWeightABase + offset_a, config_.access_bytes};
+        return {Operation::kLoad, kWeightABase + offset_a,
+                config_.transaction_bytes};
     }
     const std::uint64_t base = config_.operator_name == "attention"
                                    ? kWeightBBase
                                    : kWeightBBase + stream_bytes;
-    return {Operation::kLoad, base + offset_b,
-            config_.access_bytes};
+    return {Operation::kLoad, base + offset_b, config_.transaction_bytes};
 }
 
 }  // namespace scope_model

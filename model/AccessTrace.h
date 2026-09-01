@@ -28,6 +28,7 @@ struct TraceConfig {
     std::uint64_t sampled_working_set_bytes = 0;
     std::uint64_t cycle_access_cap = 0;
     std::size_t access_bytes = 16;
+    std::size_t transaction_bytes = 0;
     std::size_t cache_line_bytes = 128;
     std::size_t working_set_stride_bytes = 64;
     std::size_t bytes_per_element = 2;

@@ -110,6 +110,8 @@ int main(int argc, char** argv) {
             args, "cycle-access-cap", trace_config.cycle_access_cap);
         trace_config.access_bytes = number<std::size_t>(
             args, "access-bytes", trace_config.access_bytes);
+        trace_config.transaction_bytes = number<std::size_t>(
+            args, "transaction-bytes", trace_config.access_bytes);
         trace_config.working_set_stride_bytes = number<std::size_t>(
             args, "working-set-stride-bytes",
             trace_config.working_set_stride_bytes);
@@ -173,6 +175,10 @@ int main(int argc, char** argv) {
                           : "tile-based SwiGLU GEMM/GEMV")
                   << "\""
                   << ",\"isa_access_bytes\":" << trace_config.access_bytes
+                  << ",\"cache_transaction_bytes\":"
+                  << trace_config.transaction_bytes
+                  << ",\"isa_accesses_per_cache_transaction\":"
+                  << trace_config.transaction_bytes / trace_config.access_bytes
                   << ",\"cache_line_bytes\":" << trace_config.cache_line_bytes
                   << ",\"vector_accesses_per_cache_line\":"
                   << trace_config.cache_line_bytes / trace_config.access_bytes

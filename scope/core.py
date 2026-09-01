@@ -342,13 +342,15 @@ def _cpp_openvla_hit_rates(
     sample_accesses = int(model.get("sample_accesses", 0))
     seed = int(model.get("seed", 7))
     access_bytes = int(model.get("isa_access_bytes", 16))
+    transaction_bytes = int(model.get("cache_transaction_bytes", access_bytes))
     bytes_per_element = int(model.get("bytes_per_element", 2))
     stride_bytes = int(model.get("working_set_stride_bytes", line_bytes))
     cycle_access_cap = int(model.get("trace_cycle_accesses", 0))
     key = (
         operator, capacities, associativities, policies, line_bytes,
         sampled_working_set_bytes, warmup_accesses, sample_accesses,
-        seed, access_bytes, bytes_per_element, stride_bytes, cycle_access_cap,
+        seed, access_bytes, transaction_bytes, bytes_per_element, stride_bytes,
+        cycle_access_cap,
         tuple(sorted((str(key), int(value)) for key, value in shape.items())),
     )
     cached = _CPP_HIT_RATE_CACHE.get(key)
@@ -364,6 +366,7 @@ def _cpp_openvla_hit_rates(
         "--line-bytes", str(line_bytes),
         "--sampled-working-set-bytes", str(sampled_working_set_bytes),
         "--access-bytes", str(access_bytes),
+        "--transaction-bytes", str(transaction_bytes),
         "--bytes-per-element", str(bytes_per_element),
         "--working-set-stride-bytes", str(stride_bytes),
         "--cycle-access-cap", str(cycle_access_cap),
@@ -410,9 +413,9 @@ def _cpp_openvla_hit_rates(
             "https://github.com/openvla/openvla/blob/main/prismatic/conf/models.py",
         "cache_method_source": "ChampSim/gem5-style warmup + set-associative LRU",
         "trace_basis": (
-            "seeded ISA-granularity 16B vector load/store sample emitted in "
-            "128B cache-line bursts from one real-shape OpenVLA Attention or "
-            "FFN layer"
+            "seeded 16B ISA vector operations coalesced into configurable "
+            "cache transactions from one real-shape OpenVLA Attention or FFN "
+            "layer"
         ),
         "hardware_trace_available": False,
         "selection": (
@@ -2757,6 +2760,84 @@ def comparison_summary(case_id: str, report: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def evaluation_acceptance(
+    raw: Dict[str, Any], summaries: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Evaluate optional workload-level calibration guardrails."""
+    configured = raw.get("acceptance")
+    if configured is None:
+        return []
+    require(isinstance(configured, dict), "acceptance must be an object")
+    cases = {str(item["case"]): item for item in summaries}
+    require({"all_sram", "all_osfet", "optimized"} <= set(cases),
+            "acceptance requires all_sram, all_osfet, and optimized cases")
+    optimized = cases["optimized"]
+    latency = float(optimized["average_latency_ns"])
+    latency_range = dict(configured["optimized_latency_ns"])
+    lower = float(latency_range["min"])
+    upper = float(latency_range["max"])
+    minimum_reduction = float(
+        configured["minimum_latency_reduction_vs_pure"]
+    )
+    reductions = {
+        name: 1.0 - latency / float(cases[name]["average_latency_ns"])
+        for name in ("all_sram", "all_osfet")
+    }
+    max_l1_hit = float(configured["maximum_optimized_l1_hit_rate"])
+    min_refresh_power = float(
+        configured["minimum_all_osfet_refresh_power_mw"]
+    )
+    min_refresh_occupancy = float(
+        configured["minimum_all_osfet_l1_refresh_occupancy"]
+    )
+    checks = [
+        {
+            "metric": "optimized_latency_ns",
+            "value": latency,
+            "criterion": f"{lower} <= value <= {upper}",
+            "pass": lower <= latency <= upper,
+        },
+        {
+            "metric": "latency_reduction_vs_all_sram",
+            "value": reductions["all_sram"],
+            "criterion": f"value >= {minimum_reduction}",
+            "pass": reductions["all_sram"] >= minimum_reduction,
+        },
+        {
+            "metric": "latency_reduction_vs_all_osfet",
+            "value": reductions["all_osfet"],
+            "criterion": f"value >= {minimum_reduction}",
+            "pass": reductions["all_osfet"] >= minimum_reduction,
+        },
+        {
+            "metric": "optimized_l1_hit_rate",
+            "value": float(optimized["conditional_hit_rates"][0]),
+            "criterion": f"value <= {max_l1_hit}",
+            "pass": float(optimized["conditional_hit_rates"][0]) <= max_l1_hit,
+        },
+        {
+            "metric": "all_osfet_refresh_power_mw",
+            "value": float(cases["all_osfet"]["refresh_power_mw"]),
+            "criterion": f"value >= {min_refresh_power}",
+            "pass": float(cases["all_osfet"]["refresh_power_mw"])
+                    >= min_refresh_power,
+        },
+        {
+            "metric": "all_osfet_l1_refresh_occupancy",
+            "value": float(
+                cases["all_osfet"]["refresh_bandwidth_occupancy"][0]
+            ),
+            "criterion": f"value >= {min_refresh_occupancy}",
+            "pass": float(
+                cases["all_osfet"]["refresh_bandwidth_occupancy"][0]
+            ) >= min_refresh_occupancy,
+        },
+    ]
+    failed = [item["metric"] for item in checks if not item["pass"]]
+    require(not failed, f"evaluation acceptance failed: {failed}")
+    return checks
+
+
 def evaluate_comparison_suite(
     raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner, *,
     auto_build: bool, device_library: Dict[str, Dict[str, Any]],
@@ -2805,6 +2886,7 @@ def evaluate_comparison_suite(
     ]
     ranking_pool = feasible_architectures or architecture_summaries
     best = max(ranking_pool, key=lambda item: item["fom_per_ns_mw"])
+    acceptance_checks = evaluation_acceptance(raw, architecture_summaries)
     return {
         "schema_version": int(raw.get("schema_version", 7)),
         "name": str(raw.get("name", "SCOPE evaluation suite")),
@@ -2817,6 +2899,7 @@ def evaluate_comparison_suite(
         "best_evaluated_architecture": best["case"],
         "architecture_comparison": architecture_summaries,
         "feature_comparison": feature_summaries,
+        "acceptance_checks": acceptance_checks,
         "case_reports": case_reports,
     }
 
@@ -2840,6 +2923,8 @@ def print_comparison(report: Dict[str, Any]) -> None:
             f"capacity(KiB)={capacities}  hit={hits}  BER={ber}  "
             f"feasible={str(item['feasible']).lower()}"
         )
+    if report.get("acceptance_checks"):
+        print("Acceptance checks: PASS")
     print("Feature ablation on the optimized architecture:")
     for item in report["feature_comparison"]:
         print(

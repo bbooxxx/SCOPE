@@ -581,7 +581,11 @@ class ScopeTests(unittest.TestCase):
             current_alpha=1.3,
         )
         self.assertAlmostEqual(bti.vth_max_mv, 70.0)
-        self.assertAlmostEqual(bti.equivalent_retention_s, 16913.9235815)
+        self.assertAlmostEqual(
+            bti.reference_equivalent_retention_s, 16913.9235815
+        )
+        self.assertGreater(bti.total_acceleration, 7.0e5)
+        self.assertAlmostEqual(bti.equivalent_retention_s, 0.0222718334)
         self.assertLess(bti.refresh_interval_s, bti.equivalent_retention_s)
         self.assertLess(bti.shift_at_refresh_mv, bti.vth_max_mv)
         self.assertGreater(bti.read_latency_guardband, 1.0)
@@ -619,11 +623,37 @@ class ScopeTests(unittest.TestCase):
         )
         self.assertEqual(raw["schema_version"], 8)
         self.assertEqual({layer["line_bytes"] for layer in raw["layers"]}, {128})
+        self.assertEqual(
+            raw["workload"]["hit_rate_model"]["cache_transaction_bytes"], 128
+        )
+        self.assertEqual(raw["workload"]["hit_rate_model"]["isa_access_bytes"], 16)
+        self.assertEqual(raw["layers"][2]["banks"], 64)
         self.assertEqual(raw["device_library"], "config/device_library_v8.json")
         self.assertEqual(
             self.library_v8["OSFET-eDRAM"]["refresh"]["model"],
             "bti_row_read_write",
         )
+
+    def test_v8_acceptance_guards_latency_hit_rate_and_refresh(self) -> None:
+        config = scope.load_json(ROOT / "config/scope_v8.json")
+        summaries = [
+            {"case": "all_sram", "average_latency_ns": 20.0},
+            {
+                "case": "all_osfet", "average_latency_ns": 12.0,
+                "refresh_power_mw": 4.0,
+                "refresh_bandwidth_occupancy": [0.5, 0.2, 0.2],
+            },
+            {
+                "case": "optimized", "average_latency_ns": 7.5,
+                "conditional_hit_rates": [0.5, 0.8, 0.9],
+            },
+        ]
+        checks = scope.evaluation_acceptance(config, summaries)
+        self.assertTrue(checks)
+        self.assertTrue(all(item["pass"] for item in checks))
+        summaries[2]["average_latency_ns"] = 8.5
+        with self.assertRaises(scope.ScopeError):
+            scope.evaluation_acceptance(config, summaries)
 
     def test_v4_uses_orin_lpddr5_and_screened_search_space(self) -> None:
         config = json.loads((ROOT / "config/scope_v4.json").read_text())
