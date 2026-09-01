@@ -1,0 +1,10 @@
+{
+  "extends": "device_library_v6.json",
+  "schema_version": 7,
+  "source": "Memory_Tech_Comparison.xlsx plus SCOPE v3-v6 equations and v7 evaluation controls",
+  "semantics": {
+    "feature_switches": "array nonideality, configurable peripheral overlays, and M3D cost overlays can be disabled independently without changing the trace, capacity, cache policy, NoC, or LPDDR inputs",
+    "peripheral_ablation": "disabled means use the DESTINY-native sense amplifier and ignore SCOPE peripheral overrides; the native peripheral is not removed or assigned zero power",
+    "m3d_ablation": "disabled removes M3D latency, energy, and footprint accounting while retaining the configured cache capacity, so the result is a controlled model ablation rather than a different cache hierarchy"
+  }
+}

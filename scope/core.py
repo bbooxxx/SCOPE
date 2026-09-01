@@ -34,6 +34,11 @@ from .sense_amp import evaluate_sense_amp
 
 FLOAT_RE = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
 VALID_POLICIES = {"LRU", "FIFO", "RANDOM"}
+FEATURE_SWITCH_DEFAULTS = {
+    "array_nonideal": True,
+    "configurable_peripherals": True,
+    "m3d": True,
+}
 GUIDANCE_METRICS = {
     "latency": "average_latency_ns",
     "latency_ns": "average_latency_ns",
@@ -59,6 +64,19 @@ def require(condition: bool, message: str) -> None:
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def resolve_feature_switches(raw: Dict[str, Any]) -> Dict[str, bool]:
+    """Return validated evaluation switches, preserving pre-v7 behavior."""
+    configured = raw.get("features", {})
+    require(isinstance(configured, dict), "features must be an object")
+    unknown = set(configured) - set(FEATURE_SWITCH_DEFAULTS)
+    require(not unknown, f"unknown feature switches: {sorted(unknown)}")
+    resolved = dict(FEATURE_SWITCH_DEFAULTS)
+    for name, value in configured.items():
+        require(isinstance(value, bool), f"features.{name} must be boolean")
+        resolved[name] = value
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -818,7 +836,8 @@ def _apply_device_library(
 def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Path,
                 global_ber_max: float,
                 device_library: Dict[str, Dict[str, Any]],
-                model_library: Optional[Dict[str, Any]] = None) -> LayerSpec:
+                model_library: Optional[Dict[str, Any]] = None,
+                features: Optional[Dict[str, bool]] = None) -> LayerSpec:
     name = str(raw["name"])
     device = str(raw["device"])
     require(device in device_library,
@@ -880,12 +899,16 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
     stacked_tiers = int(raw.get("stacked_tiers", 4 if has_density_divisor else 1))
     require(stacked_tiers > 0, f"{name}: stacked_tiers must be positive")
     models = model_library or {}
+    feature_flags = dict(FEATURE_SWITCH_DEFAULTS)
+    feature_flags.update(features or {})
     sense_amp_result: Optional[Dict[str, Any]] = None
     m3d_result: Optional[Dict[str, Any]] = None
     nonideal_result: Optional[Dict[str, Any]] = None
     static_components = {"data_cells_mw": device_leakage_mw}
     effective_values = asdict(effective_metrics)
-    if "sense_amplifier" in entry and "sense_amplifier_models" in models:
+    if (feature_flags["configurable_peripherals"] and
+            "sense_amplifier" in entry and
+            "sense_amplifier_models" in models):
         try:
             evaluated_sa = evaluate_sense_amp(
                 raw_metrics,
@@ -896,6 +919,7 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
         except ValueError as exc:
             raise ScopeError(f"{name}: {exc}") from exc
         sense_amp_result = evaluated_sa.to_dict()
+        sense_amp_result["configuration_enabled"] = True
         effective_values["hit_latency_ns"] = max(
             0.0,
             float(effective_values["hit_latency_ns"])
@@ -908,22 +932,53 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
         )
         static_components["sense_amplifiers_mw"] = \
             evaluated_sa.selected_leakage_mw
+    elif "sense_amplifier" in entry:
+        interface = dict(entry["sense_amplifier"])
+        native_type = str(interface.get(
+            "destiny_native_type", raw_metrics.native_sense_amp_type or "voltage"
+        )).lower()
+        sense_amp_result = {
+            "configuration_enabled": False,
+            "selected_type": native_type,
+            "destiny_native_type": native_type,
+            "read_signal": str(interface.get("read_signal", "unspecified")),
+            "supported_types": [native_type],
+            "compatible": True,
+            "selected_latency_ns": raw_metrics.sense_amp_latency_ns,
+            "selected_energy_nj": raw_metrics.sense_amp_read_energy_nj,
+            "selected_leakage_mw": raw_metrics.sense_amp_leakage_mw,
+            "hit_latency_delta_ns": 0.0,
+            "hit_energy_delta_nj": 0.0,
+            "comparison_basis": (
+                "configurable peripheral overlay disabled; use DESTINY native SA"
+            ),
+        }
+        static_components["sense_amplifiers_mw"] = \
+            raw_metrics.sense_amp_leakage_mw
 
+    nonideal_entry = copy.deepcopy(entry)
+    if not feature_flags["array_nonideal"]:
+        disabled_nonideal = dict(nonideal_entry.get("nonideal", {}))
+        disabled_nonideal["enabled"] = False
+        nonideal_entry["nonideal"] = disabled_nonideal
     evaluated_nonideal = evaluate_nonideal(
         raw_metrics,
         float(effective_values["hit_latency_ns"]),
         line_bytes * 8,
-        entry,
+        nonideal_entry,
         sense_amp_result,
         float(raw["ber"]),
     )
     nonideal_result = evaluated_nonideal.to_dict()
+    nonideal_result["feature_enabled"] = feature_flags["array_nonideal"]
     effective_values["hit_latency_ns"] += \
         evaluated_nonideal.read_latency_penalty_ns
     effective_values["hit_energy_nj"] += \
         evaluated_nonideal.read_energy_penalty_nj
 
-    m3d_cfg = raw.get("m3d", {})
+    m3d_cfg = dict(raw.get("m3d", {}))
+    if not feature_flags["m3d"]:
+        m3d_cfg["enabled"] = False
     if m3d_cfg or models.get("m3d_defaults"):
         try:
             evaluated_m3d = evaluate_m3d(
@@ -939,6 +994,7 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
         except (KeyError, ValueError) as exc:
             raise ScopeError(f"{name}: invalid M3D configuration: {exc}") from exc
         m3d_result = evaluated_m3d.to_dict()
+        m3d_result["feature_enabled"] = feature_flags["m3d"]
         if evaluated_m3d.enabled:
             effective_values["hit_latency_ns"] += evaluated_m3d.latency_penalty_ns
             effective_values["write_latency_ns"] += evaluated_m3d.latency_penalty_ns
@@ -976,8 +1032,14 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
         line_bytes=line_bytes,
         replacement_policy=policy,
         banks=banks,
-        peripheral_latency_ns=float(raw.get("peripheral_latency_ns", 0.0)),
-        peripheral_energy_nj=float(raw.get("peripheral_energy_nj", 0.0)),
+        peripheral_latency_ns=(
+            float(raw.get("peripheral_latency_ns", 0.0))
+            if feature_flags["configurable_peripherals"] else 0.0
+        ),
+        peripheral_energy_nj=(
+            float(raw.get("peripheral_energy_nj", 0.0))
+            if feature_flags["configurable_peripherals"] else 0.0
+        ),
         ber=evaluated_nonideal.effective_ber,
         ber_max=float(raw.get("ber_max", global_ber_max)),
         allow_high_variation=bool(raw.get("allow_high_variation", False)),
@@ -2150,6 +2212,7 @@ def design_variants(
     automatic = raw.get("auto_selection", {})
     require(isinstance(automatic, dict), "auto_selection must be an object")
     auto_enabled = bool(automatic.get("enabled", False))
+    feature_flags = resolve_feature_switches(raw)
     all_devices = automatic.get("devices", list(device_library))
     require(isinstance(all_devices, list) and all_devices,
             "auto_selection.devices must be a non-empty list")
@@ -2230,10 +2293,11 @@ def design_variants(
                 merged["destiny_optimization_target"] = target
             entry = device_library[str(merged["device"])]
             interface = entry.get("sense_amplifier", {})
-            default_sa = str(interface.get(
-                "default_type", interface.get("destiny_native_type", "voltage")
-            ))
-            if explore and interface:
+            native_sa = str(interface.get("destiny_native_type", "voltage"))
+            default_sa = str(interface.get("default_type", native_sa))
+            if not feature_flags["configurable_peripherals"]:
+                sa_choices = [native_sa]
+            elif explore and interface:
                 sa_choices = merged.get(
                     "sense_amp_types", interface.get("supported_types", [default_sa])
                 )
@@ -2261,6 +2325,7 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
                     model_library: Optional[Dict[str, Any]] = None
                     ) -> Tuple[ScopeModel, Dict[str, Any]]:
     runner.ensure_built(auto_build=auto_build)
+    feature_flags = resolve_feature_switches(raw)
     global_ber_max = float(raw.get("constraints", {}).get("ber_max", 1.0))
     layer_specs: List[LayerSpec] = []
     for layer_raw in raw["layers"]:
@@ -2268,7 +2333,7 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
         metrics = runner.run(cfg_path)
         layer_specs.append(build_layer(
             layer_raw, metrics, repo_root, global_ber_max, device_library,
-            model_library,
+            model_library, feature_flags,
         ))
     require([layer.name for layer in layer_specs] == ["L1", "L2", "L3"],
             "layers must be ordered and named L1, L2, L3")
@@ -2314,6 +2379,7 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
     report = model.average()
     report["name"] = str(raw.get("name", "SCOPE"))
     report["selected_workload"] = str(raw.get("selected_workload", "custom"))
+    report["features"] = feature_flags
     guidance = guidance_score(report, raw.get("guidance", {}))
     report["guidance"] = guidance
     report["guidance_score"] = guidance["score"]
@@ -2338,6 +2404,8 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
             "line_bytes": layer.line_bytes,
             "replacement_policy": layer.replacement_policy,
             "banks": layer.banks,
+            "effective_ber": layer.ber,
+            "ber_limit": layer.ber_max,
             "sram_baseline_capacity_bytes": layer_raw.get(
                 "sram_baseline_capacity_bytes", layer.capacity_bytes
             ),
@@ -2465,6 +2533,259 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
     return model, report
 
 
+def _exploration_record(report: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "devices": [layer["device"] for layer in report["layers"]],
+        "sense_amplifiers": [
+            (layer.get("sense_amplifier") or {}).get("selected_type")
+            for layer in report["layers"]
+        ],
+        "average_latency_ns": report["average_latency_ns"],
+        "average_power_mw": report["average_power_mw"],
+        "hit_rates": report["hit_rates"],
+        "offchip_reach_probability": report["offchip_reach_probability"],
+        "fom_per_ns_mw": report["fom_per_ns_mw"],
+        "guidance_score": report["guidance_score"],
+        "capacities_bytes": [
+            layer["capacity_bytes"] for layer in report["layers"]
+        ],
+        "effective_ber": [
+            layer["effective_ber"] for layer in report["layers"]
+        ],
+        "destiny_optimization_targets": [
+            layer["destiny_optimization_target"] for layer in report["layers"]
+        ],
+        "feasible": report["feasible"],
+    }
+
+
+def evaluate_design(
+    raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner, *,
+    auto_build: bool, device_library: Dict[str, Dict[str, Any]],
+    model_library: Dict[str, Any], library_path: Path, explore: bool,
+    instruction_override: Optional[Sequence[Dict[str, Any]]] = None,
+) -> Tuple[ScopeModel, Dict[str, Any]]:
+    """Evaluate and select the best feasible circuit variant for one design."""
+    variants = design_variants(
+        raw, explore=explore, repo_root=repo_root,
+        device_library=device_library,
+    )
+    evaluations = [
+        evaluate_config(
+            variant, repo_root, runner, auto_build=auto_build,
+            device_library=device_library, model_library=model_library,
+        )
+        for variant in variants
+    ]
+    feasible = [item for item in evaluations if item[1]["feasible"]]
+    pool = feasible if feasible else evaluations
+    model, report = max(pool, key=lambda item: item[1]["guidance_score"])
+    report["exploration"] = {
+        "evaluated_designs": len(evaluations),
+        "feasible_designs": len(feasible),
+        "selected_highest_feasible_fom": bool(feasible),
+        "designs": [_exploration_record(item[1]) for item in evaluations],
+    }
+    report["device_library"] = {
+        "path": str(library_path.relative_to(repo_root)),
+        "schema_version": model_library.get("schema_version"),
+        "source": model_library.get("source"),
+        "semantics": model_library.get("semantics"),
+    }
+    report["auto_selection"] = raw.get("auto_selection", {"enabled": False})
+    cases = list(instruction_override) if instruction_override is not None else \
+        raw.get("instruction_cases", [])
+    report["instructions"] = [
+        model.instruction(str(case["op"]), str(case["hit_level"]))
+        for case in cases
+    ]
+    return model, report
+
+
+def build_evaluation_cases(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Expand v7 architecture comparisons and one-at-a-time ablations."""
+    suite = raw.get("evaluation_suite")
+    require(isinstance(suite, dict),
+            "evaluation_suite must be provided for --compare")
+    architectures = suite.get("architectures")
+    require(isinstance(architectures, list) and architectures,
+            "evaluation_suite.architectures must be a non-empty list")
+    names: set[str] = set()
+    cases: List[Dict[str, Any]] = []
+    base_features = resolve_feature_switches(raw)
+    for architecture in architectures:
+        require(isinstance(architecture, dict),
+                "each evaluation architecture must be an object")
+        name = str(architecture.get("name", ""))
+        devices = architecture.get("devices")
+        require(name and name not in names,
+                "evaluation architecture names must be unique and non-empty")
+        require(isinstance(devices, list) and len(devices) == 3,
+                f"evaluation architecture {name} must list three devices")
+        names.add(name)
+        case_raw = copy.deepcopy(raw)
+        case_raw["name"] = f"{raw.get('name', 'SCOPE')} / {name}"
+        case_raw["features"] = dict(base_features)
+        for layer, device in zip(case_raw["layers"], devices):
+            layer["devices"] = [str(device)]
+        cases.append({
+            "id": name,
+            "group": "architecture",
+            "architecture": name,
+            "config": case_raw,
+        })
+
+    optimized = str(suite.get("optimized_architecture", "optimized"))
+    require(optimized in names,
+            "evaluation_suite.optimized_architecture is not defined")
+    optimized_devices = next(
+        item["devices"] for item in architectures
+        if str(item["name"]) == optimized
+    )
+    ablations = suite.get(
+        "feature_ablations", list(FEATURE_SWITCH_DEFAULTS)
+    )
+    require(isinstance(ablations, list) and ablations,
+            "evaluation_suite.feature_ablations must be a non-empty list")
+    for feature in ablations:
+        feature_name = str(feature)
+        require(feature_name in FEATURE_SWITCH_DEFAULTS,
+                f"unknown feature ablation: {feature_name}")
+        case_raw = copy.deepcopy(raw)
+        case_raw["name"] = (
+            f"{raw.get('name', 'SCOPE')} / {optimized} / {feature_name}=off"
+        )
+        case_raw["features"] = dict(base_features)
+        case_raw["features"][feature_name] = False
+        for layer, device in zip(case_raw["layers"], optimized_devices):
+            layer["devices"] = [str(device)]
+        cases.append({
+            "id": f"{optimized}_{feature_name}_off",
+            "group": "feature_ablation",
+            "architecture": optimized,
+            "disabled_feature": feature_name,
+            "config": case_raw,
+        })
+    return cases
+
+
+def comparison_summary(case_id: str, report: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the v7 comparison surface compact and machine-readable."""
+    return {
+        "case": case_id,
+        "features": report["features"],
+        "devices": [layer["device"] for layer in report["layers"]],
+        "sense_amplifiers": [
+            (layer.get("sense_amplifier") or {}).get("selected_type")
+            for layer in report["layers"]
+        ],
+        "average_latency_ns": report["average_latency_ns"],
+        "average_power_mw": report["average_power_mw"],
+        "fom_per_ns_mw": report["fom_per_ns_mw"],
+        "capacities_bytes": [
+            layer["capacity_bytes"] for layer in report["layers"]
+        ],
+        "conditional_hit_rates": list(report["hit_rates"]),
+        "effective_ber": [
+            layer["effective_ber"] for layer in report["layers"]
+        ],
+        "offchip_reach_probability": report["offchip_reach_probability"],
+        "feasible": report["feasible"],
+    }
+
+
+def evaluate_comparison_suite(
+    raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner, *,
+    auto_build: bool, device_library: Dict[str, Dict[str, Any]],
+    model_library: Dict[str, Any], library_path: Path,
+) -> Dict[str, Any]:
+    """Run v7 architecture and feature-ablation comparisons."""
+    case_specs = build_evaluation_cases(raw)
+    case_reports: Dict[str, Dict[str, Any]] = {}
+    architecture_summaries: List[Dict[str, Any]] = []
+    for case in case_specs:
+        _, report = evaluate_design(
+            case["config"], repo_root, runner,
+            auto_build=auto_build, device_library=device_library,
+            model_library=model_library, library_path=library_path,
+            explore=True,
+        )
+        case_reports[case["id"]] = report
+        summary = comparison_summary(case["id"], report)
+        if case["group"] == "architecture":
+            architecture_summaries.append(summary)
+
+    suite = raw["evaluation_suite"]
+    optimized = str(suite.get("optimized_architecture", "optimized"))
+    baseline = comparison_summary(optimized, case_reports[optimized])
+    feature_summaries = [dict(baseline, comparison="all_features_on")]
+    for case in case_specs:
+        if case["group"] != "feature_ablation":
+            continue
+        summary = comparison_summary(case["id"], case_reports[case["id"]])
+        summary["comparison"] = f"{case['disabled_feature']}_off"
+        summary["delta_vs_all_features_on"] = {
+            "average_latency_ns": (
+                summary["average_latency_ns"] - baseline["average_latency_ns"]
+            ),
+            "average_power_mw": (
+                summary["average_power_mw"] - baseline["average_power_mw"]
+            ),
+            "fom_per_ns_mw": (
+                summary["fom_per_ns_mw"] - baseline["fom_per_ns_mw"]
+            ),
+        }
+        feature_summaries.append(summary)
+
+    feasible_architectures = [
+        item for item in architecture_summaries if item["feasible"]
+    ]
+    ranking_pool = feasible_architectures or architecture_summaries
+    best = max(ranking_pool, key=lambda item: item["fom_per_ns_mw"])
+    return {
+        "schema_version": 7,
+        "name": str(raw.get("name", "SCOPE v7 evaluation suite")),
+        "selected_workload": str(raw.get("selected_workload", "custom")),
+        "comparison_method": (
+            "same OpenVLA trace, cache policy, line size, NoC and LPDDR model; "
+            "feature ablations change one overlay at a time"
+        ),
+        "optimized_architecture": optimized,
+        "best_evaluated_architecture": best["case"],
+        "architecture_comparison": architecture_summaries,
+        "feature_comparison": feature_summaries,
+        "case_reports": case_reports,
+    }
+
+
+def print_comparison(report: Dict[str, Any]) -> None:
+    print(
+        f"SCOPE v7 comparison [workload={report['selected_workload']}]"
+    )
+    print("=" * 120)
+    print("Architecture comparison:")
+    for item in report["architecture_comparison"]:
+        capacities = "/".join(str(value // 1024) for value in item["capacities_bytes"])
+        hits = "/".join(f"{value:.4f}" for value in item["conditional_hit_rates"])
+        ber = "/".join(f"{value:.2e}" for value in item["effective_ber"])
+        print(
+            f"  {item['case']:<18} devices={'/'.join(item['devices']):<44} "
+            f"lat={item['average_latency_ns']:.6f} ns  "
+            f"power={item['average_power_mw']:.6f} mW  "
+            f"FoM={item['fom_per_ns_mw']:.9g}  "
+            f"capacity(KiB)={capacities}  hit={hits}  BER={ber}  "
+            f"feasible={str(item['feasible']).lower()}"
+        )
+    print("Feature ablation on the optimized architecture:")
+    for item in report["feature_comparison"]:
+        print(
+            f"  {item['comparison']:<30} "
+            f"lat={item['average_latency_ns']:.6f} ns  "
+            f"power={item['average_power_mw']:.6f} mW  "
+            f"FoM={item['fom_per_ns_mw']:.9g}"
+        )
+
+
 def print_report(report: Dict[str, Any], instructions: Sequence[Dict[str, Any]]) -> None:
     print(
         f"SCOPE evaluation: {report['name']} "
@@ -2550,6 +2871,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help="where the explicit instruction obtains its cache line")
     parser.add_argument("--explore", action="store_true",
                         help="evaluate the Cartesian product of per-layer candidates")
+    parser.add_argument("--compare", action="store_true",
+                        help="run the configured v7 architecture and feature suite")
     parser.add_argument("--workload",
                         help="select a named workload profile from config.workloads")
     parser.add_argument("--json-output", type=Path,
@@ -2561,6 +2884,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if bool(args.op) != bool(args.hit_level):
         parser.error("--op and --hit-level must be provided together")
+    if args.compare and (args.op or args.explore):
+        parser.error("--compare cannot be combined with --op/--hit-level or --explore")
     return args
 
 
@@ -2579,74 +2904,28 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 "device library must contain a non-empty devices object")
         binary = _resolve_path(repo_root, str(raw.get("destiny_binary", "destiny")))
         runner = DestinyRunner(repo_root, binary, timeout_s=args.timeout)
-        variants = design_variants(
-            raw, explore=args.explore, repo_root=repo_root,
-            device_library=device_library,
-        )
-        evaluations: List[Tuple[ScopeModel, Dict[str, Any]]] = []
-        for variant in variants:
-            evaluations.append(
-                evaluate_config(
-                    variant,
-                    repo_root,
-                    runner,
-                    auto_build=not args.no_build,
-                    device_library=device_library,
-                    model_library=library_raw,
-                )
+        if args.compare:
+            report = evaluate_comparison_suite(
+                raw, repo_root, runner, auto_build=not args.no_build,
+                device_library=device_library, model_library=library_raw,
+                library_path=library_path,
             )
-        feasible = [item for item in evaluations if item[1]["feasible"]]
-        pool = feasible if feasible else evaluations
-        model, report = max(pool, key=lambda item: item[1]["guidance_score"])
-        report["exploration"] = {
-            "evaluated_designs": len(evaluations),
-            "feasible_designs": len(feasible),
-            "selected_highest_feasible_fom": bool(feasible),
-            "designs": [
-                {
-                    "devices": [layer["device"] for layer in item[1]["layers"]],
-                    "sense_amplifiers": [
-                        (layer.get("sense_amplifier") or {}).get("selected_type")
-                        for layer in item[1]["layers"]
-                    ],
-                    "average_latency_ns": item[1]["average_latency_ns"],
-                    "average_power_mw": item[1]["average_power_mw"],
-                    "hit_rates": item[1]["hit_rates"],
-                    "offchip_reach_probability":
-                        item[1]["offchip_reach_probability"],
-                    "fom_per_ns_mw": item[1]["fom_per_ns_mw"],
-                    "guidance_score": item[1]["guidance_score"],
-                    "capacities_bytes": [
-                        layer["capacity_bytes"] for layer in item[1]["layers"]
-                    ],
-                    "destiny_optimization_targets": [
-                        layer["destiny_optimization_target"]
-                        for layer in item[1]["layers"]
-                    ],
-                    "feasible": item[1]["feasible"],
-                }
-                for item in evaluations
-            ],
-        }
-        report["device_library"] = {
-            "path": str(library_path.relative_to(repo_root)),
-            "schema_version": library_raw.get("schema_version"),
-            "source": library_raw.get("source"),
-            "semantics": library_raw.get("semantics"),
-        }
-        report["auto_selection"] = raw.get("auto_selection", {"enabled": False})
-        if args.op:
-            cases = [{"op": args.op, "hit_level": args.hit_level}]
+            print_comparison(report)
         else:
-            cases = raw.get("instruction_cases", [])
-        instructions = [
-            model.instruction(str(case["op"]), str(case["hit_level"]))
-            for case in cases
-        ]
-        report["instructions"] = instructions
-        print_report(report, instructions)
+            instruction_override = (
+                [{"op": args.op, "hit_level": args.hit_level}]
+                if args.op else None
+            )
+            _, report = evaluate_design(
+                raw, repo_root, runner, auto_build=not args.no_build,
+                device_library=device_library, model_library=library_raw,
+                library_path=library_path, explore=args.explore,
+                instruction_override=instruction_override,
+            )
+            print_report(report, report["instructions"])
         if args.json_output:
-            output = args.json_output if args.json_output.is_absolute() else Path.cwd() / args.json_output
+            output = args.json_output if args.json_output.is_absolute() else \
+                Path.cwd() / args.json_output
             output.parent.mkdir(parents=True, exist_ok=True)
             with output.open("w", encoding="utf-8") as stream:
                 json.dump(report, stream, indent=2, ensure_ascii=False)

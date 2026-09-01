@@ -75,6 +75,10 @@ class ScopeTests(unittest.TestCase):
             ROOT / "config/device_library_v6.json", ROOT
         )
         cls.library_v6 = cls.library_v6_raw["devices"]
+        cls.library_v7_raw = scope.load_model_library(
+            ROOT / "config/device_library_v7.json", ROOT
+        )
+        cls.library_v7 = cls.library_v7_raw["devices"]
 
     def test_device_library_contains_all_screenshot_columns(self) -> None:
         self.assertEqual(
@@ -465,6 +469,102 @@ class ScopeTests(unittest.TestCase):
             self.library_v6["OSFET-eDRAM"]["read_circuit"],
             self.library_v5["OSFET-eDRAM"]["read_circuit"],
         )
+
+    def test_v7_switches_disable_only_the_requested_model_overlays(self) -> None:
+        raw_metrics = replace(
+            metrics(3.0, 0.2, leakage=0.4),
+            subarray_rows=256,
+            subarray_columns=128,
+            rbl_capacitance_ff=40.0,
+            rbl_wire_capacitance_ff=30.0,
+            rbl_cell_capacitance_ff=10.0,
+            rwl_resistance_ohm=332.0,
+            rbl_resistance_ohm=1942.0,
+            peripheral_read_latency_ns=1.0,
+            peripheral_read_energy_nj=0.05,
+            sense_amp_latency_ns=0.02,
+            sense_amp_read_energy_nj=0.01,
+            sense_amp_leakage_mw=0.4,
+            native_sense_amp_type="voltage",
+        )
+        raw_layer = {
+            "name": "L3",
+            "device": "OSFET-eDRAM",
+            "destiny_config": "config/devices/osfet_edram.cfg",
+            "capacity_bytes": 4096,
+            "destiny_model_capacity_bytes": 4096,
+            "associativity": 1,
+            "line_bytes": 64,
+            "replacement_policy": "LRU",
+            "banks": 1,
+            "ber": 1e-9,
+            "allow_high_variation": True,
+            "wear_leveling_efficiency": 1.0,
+            "stacked_tiers": 4,
+            "m3d": {"enabled": True, "tiers": 4},
+            "peripheral_latency_ns": 0.5,
+            "peripheral_energy_nj": 0.1,
+        }
+        enabled = scope.build_layer(
+            raw_layer, raw_metrics, ROOT, 1e-8, self.library_v7,
+            self.library_v7_raw, scope.FEATURE_SWITCH_DEFAULTS,
+        )
+        disabled = scope.build_layer(
+            raw_layer, raw_metrics, ROOT, 1e-8, self.library_v7,
+            self.library_v7_raw,
+            {
+                "array_nonideal": False,
+                "configurable_peripherals": False,
+                "m3d": False,
+            },
+        )
+        self.assertTrue(enabled.nonideal["enabled"])
+        self.assertTrue(enabled.m3d["enabled"])
+        self.assertTrue(enabled.sense_amp["configuration_enabled"])
+        self.assertFalse(disabled.nonideal["enabled"])
+        self.assertFalse(disabled.m3d["enabled"])
+        self.assertFalse(disabled.sense_amp["configuration_enabled"])
+        self.assertEqual(disabled.peripheral_latency_ns, 0.0)
+        self.assertEqual(disabled.peripheral_energy_nj, 0.0)
+        self.assertLess(disabled.metrics.hit_latency_ns,
+                        enabled.metrics.hit_latency_ns)
+        self.assertGreater(disabled.metrics.leakage_power_mw,
+                           enabled.metrics.leakage_power_mw)
+
+    def test_v7_evaluation_cases_cover_requested_architectures_and_ablations(self) -> None:
+        raw = scope.select_workload(
+            scope.load_json(ROOT / "config/scope_v7.json"), "attention"
+        )
+        cases = scope.build_evaluation_cases(raw)
+        self.assertEqual(
+            [case["id"] for case in cases],
+            [
+                "all_sram", "all_osfet", "optimized",
+                "optimized_array_nonideal_off",
+                "optimized_configurable_peripherals_off",
+                "optimized_m3d_off",
+            ],
+        )
+        all_osfet = next(case for case in cases if case["id"] == "all_osfet")
+        variants = scope.design_variants(
+            all_osfet["config"], False, ROOT, self.library_v7
+        )
+        self.assertEqual(
+            [layer["capacity_bytes"] for layer in variants[0]["layers"]],
+            [4 * 1024 * 1024, 128 * 1024 * 1024, 384 * 1024 * 1024],
+        )
+        peripheral_off = next(
+            case for case in cases
+            if case["id"] == "optimized_configurable_peripherals_off"
+        )
+        self.assertEqual(
+            len(scope.design_variants(
+                peripheral_off["config"], True, ROOT, self.library_v7
+            )),
+            1,
+        )
+        self.assertEqual(scope.resolve_feature_switches({}),
+                         scope.FEATURE_SWITCH_DEFAULTS)
 
     def test_v4_uses_orin_lpddr5_and_screened_search_space(self) -> None:
         config = json.loads((ROOT / "config/scope_v4.json").read_text())
