@@ -1,3 +1,5 @@
+![SCOPE — Cache Systems for Embodied AI](assets/scope-banner.png)
+
 # SCOPE v6
 
 SCOPE 是构建在 DESTINY 之上的三级异质缓存行为级评估器。每层可独立配置器件、容量、相联度、bank、物理 subarray 上限、sense amplifier（SA）和 M3D tier 数；C++ 生成 OpenVLA Attention/FFN 的 load/store 行为 trace 并模拟 set-associative LRU 缓存，Python 组合 DESTINY 电路结果、阵列非理想效应、NoC、LPDDR、功耗和 `1/(latency×power)`。v6 把三层缓存和 LPDDR 传输统一为 128 B 行为级 cache line，与 GPU 的 128 B 对齐合并访存粒度一致。它用于早期架构筛选，不替代 SPICE、RTL 或 GPU 硬件 trace。
