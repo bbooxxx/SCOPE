@@ -108,7 +108,7 @@ def evaluate_read(
     )
 
 
-def evaluate_si_refresh(
+def evaluate_row_refresh(
     *,
     capacity_bytes: int,
     banks: int,
@@ -121,7 +121,7 @@ def evaluate_si_refresh(
     refresh_interval_us: float,
     retention_time_us: float,
 ) -> RefreshResult:
-    """Evaluate row read+write refresh power and serialized bank occupancy."""
+    """Evaluate periodic row read+write power and serialized bank occupancy."""
     if min(capacity_bytes, banks, nrow, ncolumn) <= 0:
         raise ValueError("cache and subarray geometry must be positive")
     if refresh_interval_us <= 0.0 or retention_time_us <= 0.0:
@@ -163,6 +163,11 @@ def evaluate_si_refresh(
         availability=availability,
         schedulable=occupancy < 1.0,
     )
+
+
+def evaluate_si_refresh(**kwargs: Any) -> RefreshResult:
+    """Compatibility alias for the original Si-eDRAM refresh API."""
+    return evaluate_row_refresh(**kwargs)
 
 
 def no_refresh() -> RefreshResult:

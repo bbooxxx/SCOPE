@@ -8,6 +8,7 @@ results/scope_v4_*.json
 results/scope_v5_*.json
 results/scope_v6_*.json
 results/scope_v7_*.json
+results/scope_v8_*.json
 Makefile.dep
 destiny
 scope_model

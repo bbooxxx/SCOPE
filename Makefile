@@ -27,7 +27,7 @@ MODEL_OBJ := $(patsubst model/%.cpp,$(OUTDIR)/model_%.o,$(wildcard model/*.cpp))
 DEP := Makefile.dep
 
 # file disambiguity is achieved via the .PHONY directive
-.PHONY : all clean dbg scope scope-v4 scope-v5 scope-v6 scope-v7 scope-requested test-scope
+.PHONY : all clean dbg scope scope-v4 scope-v5 scope-v6 scope-v7 scope-v8 scope-requested test-scope
 
 all: CXXFLAGS += -O3 -mtune=native
 all: dir $(target) $(model_target)
@@ -64,6 +64,10 @@ scope-v6: all
 scope-v7: all
 	python3 scope.py config/scope_v7.json --compare --json-output results/scope_v7_attention.json
 	python3 scope.py config/scope_v7.json --workload ffn --compare --json-output results/scope_v7_ffn.json
+
+scope-v8: all
+	python3 scope.py config/scope_v8.json --compare --json-output results/scope_v8_attention.json
+	python3 scope.py config/scope_v8.json --workload ffn --compare --json-output results/scope_v8_ffn.json
 
 scope-requested: all
 	python3 scope.py config/scope_v2_requested.json --json-output results/scope_v2_requested.json

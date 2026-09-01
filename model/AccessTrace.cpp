@@ -28,6 +28,8 @@ AccessTrace::AccessTrace(TraceConfig config) : config_(std::move(config)) {
         throw std::invalid_argument("operator must be attention or ffn");
     }
     if (config_.access_bytes == 0 || config_.bytes_per_element == 0 ||
+        config_.cache_line_bytes == 0 ||
+        config_.cache_line_bytes % config_.access_bytes != 0 ||
         config_.working_set_stride_bytes == 0 ||
         config_.working_set_stride_bytes % config_.access_bytes != 0) {
         throw std::invalid_argument("invalid access geometry");
@@ -77,12 +79,13 @@ AccessTrace::AccessTrace(TraceConfig config) : config_(std::move(config)) {
         throw std::invalid_argument("sampled working set is too small");
     }
     const std::uint64_t stream_bytes = config_.sampled_working_set_bytes / 2;
-    const std::uint64_t stream_accesses =
-        stream_bytes / config_.working_set_stride_bytes;
-    if (stream_accesses == 0) {
+    const std::uint64_t stream_lines = stream_bytes / config_.cache_line_bytes;
+    if (stream_lines == 0) {
         throw std::invalid_argument("sampled working set is too small");
     }
-    cycle_accesses_ = stream_accesses * 4;
+    const std::uint64_t vectors_per_line =
+        config_.cache_line_bytes / config_.access_bytes;
+    cycle_accesses_ = stream_lines * 4 * vectors_per_line;
     if (config_.cycle_access_cap > 0) {
         cycle_accesses_ = std::min(cycle_accesses_, config_.cycle_access_cap);
     }
@@ -101,27 +104,32 @@ std::uint64_t AccessTrace::permute(std::uint64_t value, std::uint64_t modulus,
 
 Access AccessTrace::at(std::uint64_t ordinal) const {
     const std::uint64_t stream_bytes = config_.sampled_working_set_bytes / 2;
-    const std::uint64_t stream_accesses =
-        stream_bytes / config_.working_set_stride_bytes;
+    const std::uint64_t stream_lines = stream_bytes / config_.cache_line_bytes;
     const std::uint64_t cycle_ordinal = ordinal % cycle_accesses_;
-    const std::uint64_t local = cycle_ordinal;
     const std::uint64_t epoch = ordinal / cycle_accesses_;
+    const std::uint64_t vectors_per_line =
+        config_.cache_line_bytes / config_.access_bytes;
+    const std::uint64_t line_group = cycle_ordinal / vectors_per_line;
+    const std::uint64_t vector_in_line = cycle_ordinal % vectors_per_line;
+    const std::uint64_t weight_tile_reuse = std::max<std::uint64_t>(
+        1, std::min<std::uint64_t>(4, config_.tile_m / 8));
+    const std::uint64_t tile_group = line_group / weight_tile_reuse;
+    const std::uint64_t cycle_line_groups =
+        (cycle_accesses_ + vectors_per_line - 1) / vectors_per_line;
     const std::uint64_t operation_rank =
-        permute(cycle_ordinal, cycle_accesses_, 0x0F0U);
-    const std::uint64_t load_quota = static_cast<std::uint64_t>(
-        analytical_read_fraction() * static_cast<double>(cycle_accesses_));
+        permute(line_group, cycle_line_groups, 0x0F0U);
+    const std::uint64_t load_quota = std::min(
+        cycle_line_groups,
+        static_cast<std::uint64_t>(
+            analytical_read_fraction() * static_cast<double>(cycle_line_groups)));
     const bool is_load = operation_rank < load_quota;
-    const std::uint64_t lane = permute(cycle_ordinal, 3, 0x1A2U);
+    const std::uint64_t lane = permute(tile_group, 3, 0x1A2U);
     const std::uint64_t offset_a =
-        permute(local, stream_accesses, 0xA11U) *
-            config_.working_set_stride_bytes +
-        permute(local, config_.working_set_stride_bytes / config_.access_bytes,
-                0xA12U) * config_.access_bytes;
+        permute(tile_group, stream_lines, 0xA11U) * config_.cache_line_bytes +
+        vector_in_line * config_.access_bytes;
     const std::uint64_t offset_b =
-        permute(local, stream_accesses, 0xB22U) *
-            config_.working_set_stride_bytes +
-        permute(local, config_.working_set_stride_bytes / config_.access_bytes,
-                0xB23U) * config_.access_bytes;
+        permute(tile_group, stream_lines, 0xB22U) * config_.cache_line_bytes +
+        vector_in_line * config_.access_bytes;
 
     const std::uint64_t activation_bytes = std::max<std::uint64_t>(
         64 * 1024,
@@ -132,27 +140,38 @@ Access AccessTrace::at(std::uint64_t ordinal) const {
             (config_.operator_name == "attention" ? config_.hidden_size
                                                    : config_.intermediate_size) *
             2);
-    const std::uint64_t activation_slots = activation_bytes / config_.access_bytes;
-    const std::uint64_t output_slots = output_bytes / config_.access_bytes;
-    const std::uint64_t tile_reuse = std::max<std::uint64_t>(
-        1, config_.tile_m * config_.tile_n / config_.tile_k);
+    const std::uint64_t activation_lines =
+        activation_bytes / config_.cache_line_bytes;
+    const std::uint64_t output_lines = output_bytes / config_.cache_line_bytes;
+    const std::uint64_t activation_reuse = config_.operator_name == "attention"
+        ? std::max<std::uint64_t>(
+              1, (config_.sequence_tokens + config_.tile_n - 1) / config_.tile_n)
+        : std::min<std::uint64_t>(
+              8, std::max<std::uint64_t>(
+                     1, (config_.intermediate_size + config_.tile_n - 1) /
+                            config_.tile_n));
 
     if (!is_load) {
-        const std::uint64_t tile_slot = (local / tile_reuse) % output_slots;
+        const std::uint64_t output_line =
+            permute(line_group, output_lines, 0x0D0U);
         const std::uint64_t base = config_.operator_name == "attention"
                                        ? kOutputBase
                                        : kStateBase;
-        return {Operation::kStore, base + tile_slot * config_.access_bytes,
+        return {Operation::kStore,
+                base + output_line * config_.cache_line_bytes +
+                    vector_in_line * config_.access_bytes,
                 config_.access_bytes};
     }
     if (lane == 0) {
-        const std::uint64_t tile_slot = (local / tile_reuse) % activation_slots;
+        const std::uint64_t activation_line =
+            (line_group / activation_reuse) % activation_lines;
         return {Operation::kLoad,
-                kActivationBase + tile_slot * config_.access_bytes,
+                kActivationBase + activation_line * config_.cache_line_bytes +
+                    vector_in_line * config_.access_bytes,
                 config_.access_bytes};
     }
     if (lane == 1) {
-        if (local % 16 == 0) {
+        if (line_group % 64 == 0) {
             return {Operation::kLoad,
                     kColdStreamBase + epoch * stream_bytes + offset_a,
                     config_.access_bytes};

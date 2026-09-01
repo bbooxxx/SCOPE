@@ -1,6 +1,7 @@
 #include "AccessTrace.h"
 #include "CacheModel.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -117,6 +118,7 @@ int main(int argc, char** argv) {
         trace_config.seed = number<std::uint64_t>(args, "seed", trace_config.seed);
 
         const std::size_t line_bytes = number<std::size_t>(args, "line-bytes", 64);
+        trace_config.cache_line_bytes = line_bytes;
         const auto capacities_text = split(text(args, "capacities", ""), ',');
         const auto associativity_text = split(text(args, "associativities", ""), ',');
         const auto policies = split(text(args, "policies", ""), ',');
@@ -162,7 +164,7 @@ int main(int argc, char** argv) {
         }
 
         std::cout << std::setprecision(15);
-        std::cout << "{\"schema_version\":5"
+        std::cout << "{\"schema_version\":8"
                   << ",\"model\":\"set_associative_trace\""
                   << ",\"operator\":\"" << trace_config.operator_name << "\""
                   << ",\"kernel\":\""
@@ -171,6 +173,13 @@ int main(int argc, char** argv) {
                           : "tile-based SwiGLU GEMM/GEMV")
                   << "\""
                   << ",\"isa_access_bytes\":" << trace_config.access_bytes
+                  << ",\"cache_line_bytes\":" << trace_config.cache_line_bytes
+                  << ",\"vector_accesses_per_cache_line\":"
+                  << trace_config.cache_line_bytes / trace_config.access_bytes
+                  << ",\"weight_tile_reuse_issue_groups\":"
+                  << std::max<std::uint64_t>(
+                         1, std::min<std::uint64_t>(4, trace_config.tile_m / 8))
+                  << ",\"trace_layout\":\"128B cache-line bursts plus operator tile reuse\""
                   << ",\"working_set_stride_bytes\":"
                   << trace_config.working_set_stride_bytes
                   << ",\"bytes_per_element\":" << trace_config.bytes_per_element

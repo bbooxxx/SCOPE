@@ -79,6 +79,10 @@ class ScopeTests(unittest.TestCase):
             ROOT / "config/device_library_v7.json", ROOT
         )
         cls.library_v7 = cls.library_v7_raw["devices"]
+        cls.library_v8_raw = scope.load_model_library(
+            ROOT / "config/device_library_v8.json", ROOT
+        )
+        cls.library_v8 = cls.library_v8_raw["devices"]
 
     def test_device_library_contains_all_screenshot_columns(self) -> None:
         self.assertEqual(
@@ -124,7 +128,7 @@ class ScopeTests(unittest.TestCase):
 
     def test_effective_static_power_does_not_reuse_raw_tag_leakage(self) -> None:
         raw = metrics(1.0, 0.1, leakage=250.0)
-        effective, device_leakage, _, _, _ = scope._apply_device_library(
+        effective, device_leakage, _, _, _, _ = scope._apply_device_library(
             raw, self.library["SOT-MRAM"], 4096, 64, 1, 0.0, 0.0
         )
         self.assertEqual(device_leakage, 0.0)
@@ -148,7 +152,7 @@ class ScopeTests(unittest.TestCase):
             peripheral_read_latency_ns=0.5,
             peripheral_read_energy_nj=0.01,
         )
-        effective, _, _, read, refresh = scope._apply_device_library(
+        effective, _, _, read, refresh, _ = scope._apply_device_library(
             raw, self.library_v3["Si-eDRAM"], 4096, 64, 1, 10.0, 10.0
         )
         self.assertAlmostEqual(read["cell_read_latency_ns"], 40e-15 * 0.1 / 33.1e-6 * 1e9)
@@ -309,6 +313,9 @@ class ScopeTests(unittest.TestCase):
         self.assertNotEqual(small.observed_read_fraction, 0.75)
         self.assertGreater(large.hit_rates[2], small.hit_rates[2])
         self.assertEqual(large.trace_metadata["isa_access_bytes"], 16)
+        self.assertEqual(large.trace_metadata["cache_line_bytes"], 64)
+        self.assertEqual(large.trace_metadata["vector_accesses_per_cache_line"], 4)
+        self.assertIn("cache-line bursts", large.trace_metadata["trace_layout"])
         self.assertIn("compulsory_misses", large.trace_metadata)
         self.assertIn("representative_access", large.trace_metadata)
 
@@ -565,6 +572,58 @@ class ScopeTests(unittest.TestCase):
         )
         self.assertEqual(scope.resolve_feature_switches({}),
                          scope.FEATURE_SWITCH_DEFAULTS)
+
+    def test_v8_osfet_bti_derives_retention_and_row_refresh(self) -> None:
+        bti = scope.evaluate_bti_retention(
+            self.library_v8["OSFET-eDRAM"]["bti"],
+            read_vgs_v=1.2,
+            initial_vth_v=0.2,
+            current_alpha=1.3,
+        )
+        self.assertAlmostEqual(bti.vth_max_mv, 70.0)
+        self.assertAlmostEqual(bti.equivalent_retention_s, 16913.9235815)
+        self.assertLess(bti.refresh_interval_s, bti.equivalent_retention_s)
+        self.assertLess(bti.shift_at_refresh_mv, bti.vth_max_mv)
+        self.assertGreater(bti.read_latency_guardband, 1.0)
+
+        raw = replace(
+            metrics(2.0, 0.2),
+            subarray_rows=256,
+            subarray_columns=128,
+            rbl_capacitance_ff=40.0,
+            rbl_wire_capacitance_ff=30.0,
+            rbl_cell_capacitance_ff=10.0,
+            peripheral_read_latency_ns=0.5,
+            peripheral_read_energy_nj=0.01,
+        )
+        effective, _, refresh_power, read, refresh, fitted = \
+            scope._apply_device_library(
+                raw, self.library_v8["OSFET-eDRAM"],
+                4096, 64, 1, 0.0, 0.0,
+            )
+        self.assertTrue(refresh["enabled"])
+        self.assertGreater(refresh_power, 0.0)
+        self.assertEqual(fitted["vth_max_mv"], 70.0)
+        self.assertGreater(read["cell_read_latency_ns"],
+                           read["fresh_cell_read_latency_ns"])
+        self.assertAlmostEqual(effective.hit_latency_ns,
+                               read["total_read_latency_ns"])
+        self.assertAlmostEqual(
+            refresh["refresh_row_latency_ns"],
+            read["total_read_latency_ns"] + effective.write_latency_ns,
+        )
+
+    def test_v8_config_keeps_128b_lines_and_bti_library(self) -> None:
+        raw = scope.select_workload(
+            scope.load_json(ROOT / "config/scope_v8.json"), "attention"
+        )
+        self.assertEqual(raw["schema_version"], 8)
+        self.assertEqual({layer["line_bytes"] for layer in raw["layers"]}, {128})
+        self.assertEqual(raw["device_library"], "config/device_library_v8.json")
+        self.assertEqual(
+            self.library_v8["OSFET-eDRAM"]["refresh"]["model"],
+            "bti_row_read_write",
+        )
 
     def test_v4_uses_orin_lpddr5_and_screened_search_space(self) -> None:
         config = json.loads((ROOT / "config/scope_v4.json").read_text())

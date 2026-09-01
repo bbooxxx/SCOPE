@@ -1,0 +1,33 @@
+{
+  "extends": "device_library_v7.json",
+  "schema_version": 8,
+  "source": "Memory_Tech_Comparison.xlsx plus SCOPE v3-v7 equations and 2024-2025 OSFET BTI measurements",
+  "semantics": {
+    "osfet_bti": "Vth,max=70 mV defines equivalent retention. A 2024 VLSI ITO:F measurement anchors Delta-Vth at 18 mV after 1 ks, while a 2025 oxide-TFT stretched-exponential fit supplies beta and tau. The resulting periodic row read+write maintenance contributes both bandwidth occupancy and refresh power.",
+    "bti_scope": "Cross-device behavior-level projection under conservative continuous DC stress; not a direct lifetime claim for one fabricated OSFET-eDRAM macro."
+  },
+  "devices": {
+    "OSFET-eDRAM": {
+      "bti": {
+        "model": "calibrated_stretched_exponential",
+        "vth_max_mv": 70.0,
+        "anchor_shift_mv": 18.0,
+        "anchor_time_s": 1000.0,
+        "anchor_temperature_k": 300.0,
+        "anchor_overdrive_field_MV_per_cm": 2.5,
+        "stretch_exponent": 0.5,
+        "trapping_time_constant_s": 750000.0,
+        "stress_duty_cycle": 1.0,
+        "refresh_safety_factor": 0.8,
+        "source_anchor": "https://doi.org/10.1109/VLSITechnologyandCir46783.2024.10631418",
+        "source_time_law": "https://doi.org/10.1002/aelm.202400766",
+        "source_context": "https://doi.org/10.23919/VLSITechnologyandCir65189.2025.11074814"
+      },
+      "refresh": {
+        "model": "bti_row_read_write",
+        "equation": "P_ref=Nrow*E_ref,row/T_ref; latency occupancy=rows_per_bank*(Lread+Lwrite)/T_ref",
+        "maintenance_action": "row read followed by rewrite/recovery before Delta-Vth reaches 70 mV"
+      }
+    }
+  }
+}

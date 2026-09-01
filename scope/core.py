@@ -25,7 +25,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
-from .edram import RefreshResult, evaluate_read, evaluate_si_refresh, no_refresh
+from .bti import evaluate_bti_retention
+from .edram import RefreshResult, evaluate_read, evaluate_row_refresh, no_refresh
 from .m3d import evaluate_m3d
 from .nonideal import evaluate_nonideal
 from .openvla_trace import build_trace, repeated
@@ -168,6 +169,7 @@ class LayerSpec:
     metrics: DestinyMetrics
     edram_read: Optional[Dict[str, Any]] = None
     refresh: Optional[Dict[str, Any]] = None
+    bti: Optional[Dict[str, Any]] = None
     sense_amp: Optional[Dict[str, Any]] = None
     m3d: Optional[Dict[str, Any]] = None
     nonideal: Optional[Dict[str, Any]] = None
@@ -408,11 +410,15 @@ def _cpp_openvla_hit_rates(
             "https://github.com/openvla/openvla/blob/main/prismatic/conf/models.py",
         "cache_method_source": "ChampSim/gem5-style warmup + set-associative LRU",
         "trace_basis": (
-            "seeded ISA-granularity vector load/store sample from one real-shape "
-            "OpenVLA Attention or FFN layer"
+            "seeded ISA-granularity 16B vector load/store sample emitted in "
+            "128B cache-line bursts from one real-shape OpenVLA Attention or "
+            "FFN layer"
         ),
         "hardware_trace_available": False,
-        "selection": "deterministic pseudo-random tensor-address sampling",
+        "selection": (
+            "deterministic tensor-tile scheduling with cache-line spatial "
+            "locality and bounded tile reuse"
+        ),
         "memory_access_rate_per_s": int(raw["trace_cycle_accesses"]) * policy_hz,
         "policy_frequency_hz": policy_hz,
     })
@@ -700,9 +706,9 @@ def _power_from_device_library(
         refresh_mw = float(refresh["value_aw_per_bit"]) * capacity_bits * 1e-15
     elif refresh_model == "same_as_leakage_reference":
         refresh_mw = capacitor_power_mw(leakage)
-    elif refresh_model in {"none", "row_read_write"}:
-        # row_read_write needs the DESTINY-selected Nrow/Ncolumn and is
-        # evaluated later by evaluate_si_refresh().
+    elif refresh_model in {"none", "row_read_write", "bti_row_read_write"}:
+        # Row refresh needs the DESTINY-selected Nrow/Ncolumn and is evaluated
+        # after the RBL equation.  BTI first derives its own retention time.
         refresh_mw = 0.0
     else:
         raise ScopeError(f"unsupported refresh model: {refresh_model}")
@@ -735,7 +741,10 @@ def _apply_device_library(
     banks: int,
     refresh_interval_us: float,
     retention_time_us: float,
-) -> Tuple[DestinyMetrics, float, float, Optional[Dict[str, Any]], Dict[str, Any]]:
+) -> Tuple[
+    DestinyMetrics, float, float, Optional[Dict[str, Any]], Dict[str, Any],
+    Optional[Dict[str, Any]],
+]:
     """Combine the device table with DESTINY-selected circuit geometry."""
     line_bits = line_bytes * 8
 
@@ -766,6 +775,7 @@ def _apply_device_library(
     hit_energy_nj = energy_floor("read_energy", raw_metrics.hit_energy_nj)
     edram_read: Optional[Dict[str, Any]] = None
     refresh_result: RefreshResult = no_refresh()
+    bti_result: Optional[Dict[str, Any]] = None
 
     read_model = str(entry["read_latency"]["model"])
     if str(entry.get("family")) == "eDRAM" and read_model == "rbl_equation":
@@ -793,8 +803,35 @@ def _apply_device_library(
         hit_latency_ns = read_result.total_read_latency_ns
         hit_energy_nj = read_result.total_read_energy_nj
 
-        if str(entry["refresh"]["model"]) == "row_read_write":
-            refresh_result = evaluate_si_refresh(
+        refresh_model = str(entry["refresh"]["model"])
+        if refresh_model == "bti_row_read_write":
+            nonideal = dict(entry.get("nonideal", {}))
+            evaluated_bti = evaluate_bti_retention(
+                dict(entry["bti"]),
+                read_vgs_v=float(nonideal["read_vgs_v"]),
+                initial_vth_v=float(nonideal["read_vth_v"]),
+                current_alpha=float(nonideal["current_alpha"]),
+            )
+            bti_result = evaluated_bti.to_dict()
+            guarded_cell_latency_ns = (
+                read_result.cell_read_latency_ns
+                * evaluated_bti.read_latency_guardband
+            )
+            edram_read["fresh_cell_read_latency_ns"] = \
+                read_result.cell_read_latency_ns
+            edram_read["cell_read_latency_ns"] = guarded_cell_latency_ns
+            edram_read["bti_read_latency_guardband"] = \
+                evaluated_bti.read_latency_guardband
+            edram_read["total_read_latency_ns"] = (
+                guarded_cell_latency_ns
+                + read_result.peripheral_read_latency_ns
+            )
+            hit_latency_ns = float(edram_read["total_read_latency_ns"])
+            refresh_interval_us = evaluated_bti.refresh_interval_s * 1e6
+            retention_time_us = evaluated_bti.equivalent_retention_s * 1e6
+
+        if refresh_model in {"row_read_write", "bti_row_read_write"}:
+            refresh_result = evaluate_row_refresh(
                 capacity_bytes=capacity_bytes,
                 banks=banks,
                 nrow=raw_metrics.subarray_rows,
@@ -803,7 +840,7 @@ def _apply_device_library(
                 write_energy_fj_per_bit=float(
                     entry["write_energy"]["value_fj_per_bit"]
                 ),
-                read_latency_ns=read_result.total_read_latency_ns,
+                read_latency_ns=hit_latency_ns,
                 write_latency_ns=write_latency_ns,
                 refresh_interval_us=refresh_interval_us,
                 retention_time_us=retention_time_us,
@@ -830,6 +867,7 @@ def _apply_device_library(
         device_refresh_mw,
         edram_read,
         refresh_result.to_dict(),
+        bti_result,
     )
 
 
@@ -880,13 +918,18 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
                 f"{name}: Si-eDRAM retention_time_us must be positive")
         require(refresh_interval_us <= retention_time_us,
                 f"{name}: Tref must not exceed Tret")
+    elif refresh_model == "bti_row_read_write":
+        require(device == "OSFET-eDRAM",
+                f"{name}: BTI row refresh is supported only for OSFET-eDRAM")
+        require(isinstance(entry.get("bti"), dict),
+                f"{name}: OSFET BTI model is missing")
     endurance = entry["endurance"].get("writes_per_line")
     if endurance is None:
         require("bti_endurance_writes_per_line" in raw,
                 f"{name}: {device} requires bti_endurance_writes_per_line")
         endurance = float(raw["bti_endurance_writes_per_line"])
     (effective_metrics, device_leakage_mw, device_refresh_mw,
-     edram_read, refresh_result) = _apply_device_library(
+     edram_read, refresh_result, bti_result) = _apply_device_library(
         raw_metrics,
         entry,
         capacity_bytes,
@@ -895,6 +938,9 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
         refresh_interval_us,
         retention_time_us,
     )
+    if bti_result is not None:
+        refresh_interval_us = float(refresh_result["refresh_interval_us"])
+        retention_time_us = float(refresh_result["retention_time_us"])
     has_density_divisor = "density_divisor" in entry
     stacked_tiers = int(raw.get("stacked_tiers", 4 if has_density_divisor else 1))
     require(stacked_tiers > 0, f"{name}: stacked_tiers must be positive")
@@ -1061,6 +1107,7 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
         metrics=effective_metrics,
         edram_read=edram_read,
         refresh=refresh_result,
+        bti=bti_result,
         sense_amp=sense_amp_result,
         m3d=m3d_result,
         nonideal=nonideal_result,
@@ -2429,6 +2476,7 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
             },
             "edram_read_equation": layer.edram_read,
             "refresh_equation": layer.refresh,
+            "bti_retention": layer.bti,
             "sense_amplifier": layer.sense_amp,
             "m3d": layer.m3d,
             "array_nonideal": layer.nonideal,
@@ -2451,12 +2499,15 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
                 "m3d_penalty_ns": (
                     layer.m3d or {}
                 ).get("latency_penalty_ns", 0.0),
+                "bti_read_latency_guardband": (
+                    layer.bti or {}
+                ).get("read_latency_guardband", 1.0),
                 "effective_hit_latency_ns": layer.metrics.hit_latency_ns,
                 "interpretation": (
                     "For equation-based eDRAM, SCOPE replaces only DESTINY's "
                     "selected RBL delay with C_RBL*deltaV/Ion and retains "
-                    "peripheral/tag timing, then applies SA, array-nonideal, and "
-                    "M3D deltas."
+                    "peripheral/tag timing, then applies BTI, SA, array-nonideal, "
+                    "and M3D deltas."
                 ),
             },
             "raw_destiny_metrics": asdict(layer.raw_metrics),
@@ -2465,8 +2516,9 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
                 "DESTINY selects bank/mat/subarray geometry and supplies peripheral/tag "
                 "terms. eDRAM replaces the selected RBL term with C_RBL*deltaV/Ion and "
                 "0.5*C_RBL*(Vdd^2-(Vdd-deltaV)^2); Si-eDRAM additionally uses row "
-                "read+write refresh power and bandwidth occupancy. Other device values "
-                "come from the selected Device Library."
+                "read+write refresh power and bandwidth occupancy. OSFET-eDRAM derives "
+                "a BTI retention limit from measured Delta-Vth(t), then uses the same "
+                "row maintenance equation. Other values come from the Device Library."
             ),
         }
         for layer, layer_raw in zip(layer_specs, raw["layers"])
@@ -2670,7 +2722,7 @@ def build_evaluation_cases(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def comparison_summary(case_id: str, report: Dict[str, Any]) -> Dict[str, Any]:
-    """Keep the v7 comparison surface compact and machine-readable."""
+    """Keep the architecture comparison surface compact and machine-readable."""
     return {
         "case": case_id,
         "features": report["features"],
@@ -2690,6 +2742,17 @@ def comparison_summary(case_id: str, report: Dict[str, Any]) -> Dict[str, Any]:
             layer["effective_ber"] for layer in report["layers"]
         ],
         "offchip_reach_probability": report["offchip_reach_probability"],
+        "refresh_power_mw": report["refresh_power_mw"],
+        "refresh_bandwidth_occupancy": [
+            float((layer.get("refresh_equation") or {}).get(
+                "bandwidth_occupancy", 0.0
+            ))
+            for layer in report["layers"]
+        ],
+        "bti_retention_s": [
+            (layer.get("bti_retention") or {}).get("equivalent_retention_s")
+            for layer in report["layers"]
+        ],
         "feasible": report["feasible"],
     }
 
@@ -2699,7 +2762,7 @@ def evaluate_comparison_suite(
     auto_build: bool, device_library: Dict[str, Dict[str, Any]],
     model_library: Dict[str, Any], library_path: Path,
 ) -> Dict[str, Any]:
-    """Run v7 architecture and feature-ablation comparisons."""
+    """Run architecture and feature-ablation comparisons."""
     case_specs = build_evaluation_cases(raw)
     case_reports: Dict[str, Dict[str, Any]] = {}
     architecture_summaries: List[Dict[str, Any]] = []
@@ -2743,8 +2806,8 @@ def evaluate_comparison_suite(
     ranking_pool = feasible_architectures or architecture_summaries
     best = max(ranking_pool, key=lambda item: item["fom_per_ns_mw"])
     return {
-        "schema_version": 7,
-        "name": str(raw.get("name", "SCOPE v7 evaluation suite")),
+        "schema_version": int(raw.get("schema_version", 7)),
+        "name": str(raw.get("name", "SCOPE evaluation suite")),
         "selected_workload": str(raw.get("selected_workload", "custom")),
         "comparison_method": (
             "same OpenVLA trace, cache policy, line size, NoC and LPDDR model; "
@@ -2760,7 +2823,7 @@ def evaluate_comparison_suite(
 
 def print_comparison(report: Dict[str, Any]) -> None:
     print(
-        f"SCOPE v7 comparison [workload={report['selected_workload']}]"
+        f"SCOPE comparison [workload={report['selected_workload']}]"
     )
     print("=" * 120)
     print("Architecture comparison:")
@@ -2773,6 +2836,7 @@ def print_comparison(report: Dict[str, Any]) -> None:
             f"lat={item['average_latency_ns']:.6f} ns  "
             f"power={item['average_power_mw']:.6f} mW  "
             f"FoM={item['fom_per_ns_mw']:.9g}  "
+            f"refresh={item['refresh_power_mw']:.6g} mW  "
             f"capacity(KiB)={capacities}  hit={hits}  BER={ber}  "
             f"feasible={str(item['feasible']).lower()}"
         )
