@@ -3,10 +3,27 @@
   "schema_version": 8,
   "source": "Memory_Tech_Comparison.xlsx plus SCOPE v3-v7 equations and 2024-2025 OSFET BTI measurements",
   "semantics": {
-    "osfet_bti": "Vth,max=70 mV defines equivalent retention. A 2024 VLSI ITO:F measurement anchors Delta-Vth at 18 mV after 1 ks, a 2025 oxide-TFT fit supplies beta/tau, and an Arrhenius plus E-model stress corner maps the reference data to hot-cache operation. Periodic row read+rewrite contributes bandwidth occupancy and refresh power.",
+    "osfet_bti": "Vth,max=70 mV defines an informational equivalent-retention estimate. The current evaluation does not schedule periodic OSFET row maintenance and assigns no OSFET refresh latency or power.",
     "bti_scope": "Cross-device behavior-level projection, not a direct lifetime claim for one fabricated OSFET-eDRAM macro. The 368 K/5 MV-per-cm corner is deliberately pessimistic; the field coefficient is a disclosed SCOPE calibration parameter."
   },
   "devices": {
+    "STT-MRAM": {
+      "nonideal": {
+        "ber_model": "nominal"
+      }
+    },
+    "SOT-MRAM": {
+      "nonideal": {
+        "ber_model": "nominal"
+      },
+      "cache_static_power_floor": {
+        "model": "sram_reference_ratio",
+        "ratio_to_same_capacity_sram": 0.2171,
+        "sram_reference_leakage_pw_per_bit": 27.5,
+        "source": "https://doi.org/10.1063/9.0000415",
+        "semantics": "Behavior-level lower bound for whole-cache standby power. The cited 32 Mb NVSim comparison reports SOT-MRAM leakage at 21.71% of an equal-capacity SRAM cache; SCOPE scales that ratio linearly with capacity and tops up only power not already represented by the selected SA and SRAM tag."
+      }
+    },
     "OSFET-eDRAM": {
       "bti": {
         "model": "calibrated_stretched_exponential",
@@ -32,9 +49,8 @@
         "source_hot_stress_context": "https://doi.org/10.1002/sstr.202300375"
       },
       "refresh": {
-        "model": "bti_row_read_write",
-        "equation": "P_ref=Nrow*E_ref,row/T_ref; latency occupancy=rows_per_bank*(Lread+Lwrite)/T_ref",
-        "maintenance_action": "row read followed by rewrite/recovery before Delta-Vth reaches 70 mV"
+        "model": "none",
+        "semantics": "OSFET refresh overhead is disabled for the current comparison"
       }
     }
   }

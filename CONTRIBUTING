@@ -1,0 +1,12 @@
+Contributing to SCOPE
+
+Open an issue with a reproducible command and configuration before proposing
+a large change. Keep patches focused and preserve third-party notices.
+
+Build with make -j2 and run python3 -m unittest discover -s tests -v.
+For model changes, include a dimensional check, parameter sources, and a
+comparison using the same workload and capacity budget. Report assumptions
+and results even when they differ from the expected architecture ranking.
+
+Generated reports and simulation outputs stay local. Submit source changes,
+tests, configuration and README updates through a pull request.

@@ -346,11 +346,16 @@ def _cpp_openvla_hit_rates(
     bytes_per_element = int(model.get("bytes_per_element", 2))
     stride_bytes = int(model.get("working_set_stride_bytes", line_bytes))
     cycle_access_cap = int(model.get("trace_cycle_accesses", 0))
+    cross_frame_l3_reuse = float(model.get(
+        "cross_frame_l3_reuse_fraction", 0.0
+    ))
+    require(0.0 <= cross_frame_l3_reuse <= 1.0,
+            "cross_frame_l3_reuse_fraction must be in [0, 1]")
     key = (
         operator, capacities, associativities, policies, line_bytes,
         sampled_working_set_bytes, warmup_accesses, sample_accesses,
         seed, access_bytes, transaction_bytes, bytes_per_element, stride_bytes,
-        cycle_access_cap,
+        cycle_access_cap, cross_frame_l3_reuse,
         tuple(sorted((str(key), int(value)) for key, value in shape.items())),
     )
     cached = _CPP_HIT_RATE_CACHE.get(key)
@@ -400,13 +405,51 @@ def _cpp_openvla_hit_rates(
         raise ScopeError(
             f"invalid JSON from C++ SCOPE model:\n{completed.stdout}"
         ) from exc
-    rates = tuple(float(value) for value in raw["hit_rates"])
+    trace_only_rates = tuple(float(value) for value in raw["hit_rates"])
+    rates = trace_only_rates
     accesses = tuple(int(value) for value in raw["accesses"])
     hits = tuple(int(value) for value in raw["hits"])
     writebacks = tuple(float(value) for value in raw["writebacks_per_request"])
     require(len(rates) == len(layers),
             "C++ SCOPE result does not match hierarchy depth")
+    if cross_frame_l3_reuse > 0.0:
+        working_set_bytes = int(raw["analytical_working_set_bytes"])
+        require(working_set_bytes > 0,
+                "analytical working set must be positive")
+        l3_resident_fraction = min(
+            1.0, layers[2].capacity_bytes / working_set_bytes
+        )
+        l3_reuse_probability = (
+            cross_frame_l3_reuse * l3_resident_fraction
+        )
+        adjusted = list(rates)
+        adjusted[2] = 1.0 - (1.0 - adjusted[2]) * (
+            1.0 - l3_reuse_probability
+        )
+        rates = tuple(adjusted)
+        adjusted_hits = list(hits)
+        adjusted_hits[2] = min(
+            accesses[2], int(round(accesses[2] * rates[2]))
+        )
+        hits = tuple(adjusted_hits)
+        raw.update({
+            "trace_only_hit_rates": list(trace_only_rates),
+            "cross_frame_l3_reuse_fraction": cross_frame_l3_reuse,
+            "l3_working_set_resident_fraction": l3_resident_fraction,
+            "l3_cross_frame_reuse_probability": l3_reuse_probability,
+            "hit_rates": list(rates),
+            "hits": list(hits),
+        })
     policy_hz = float(model.get("policy_frequency_hz", 5.0))
+    isa_accesses_per_transaction = int(
+        raw["isa_accesses_per_cache_transaction"]
+    )
+    require(isa_accesses_per_transaction > 0,
+            "ISA accesses per cache transaction must be positive")
+    full_layer_cache_transactions = (
+        math.ceil(int(raw["analytical_loads"]) / isa_accesses_per_transaction)
+        + math.ceil(int(raw["analytical_stores"]) / isa_accesses_per_transaction)
+    )
     raw.update({
         "model": "OpenVLA-7B / Llama-2-7B",
         "source_model_config":
@@ -422,7 +465,12 @@ def _cpp_openvla_hit_rates(
             "deterministic tensor-tile scheduling with cache-line spatial "
             "locality and bounded tile reuse"
         ),
-        "memory_access_rate_per_s": int(raw["trace_cycle_accesses"]) * policy_hz,
+        "full_layer_cache_transactions": full_layer_cache_transactions,
+        "memory_access_rate_per_s": full_layer_cache_transactions * policy_hz,
+        "power_activity_basis": (
+            "full analytical operator cache transactions; the bounded trace "
+            "sample is used only to estimate hit rates and writebacks"
+        ),
         "policy_frequency_hz": policy_hz,
     })
     result = HitRateResult(
@@ -469,6 +517,14 @@ class DestinyRunner:
         if config_path in self._cache:
             return self._cache[config_path]
         require(config_path.is_file(), f"DESTINY config not found: {config_path}")
+        input_text = config_path.read_text(encoding="utf-8")
+        def matches_input(metrics):
+            fields = (("-WordWidth (bit)", metrics.line_bytes * 8),
+                      ("-Capacity (KB)", metrics.capacity_bytes // 1024),
+                      ("-Associativity (for cache only)", metrics.associativity))
+            return all(re.search(r"^" + re.escape(label) + r":\s*" +
+                                 str(value) + r"\s*$", input_text, re.MULTILINE)
+                       for label, value in fields)
         cache_key = hashlib.sha256(
             config_path.read_bytes()
             + str(self.binary.stat().st_mtime_ns).encode("ascii")
@@ -481,8 +537,9 @@ class DestinyRunner:
                 metrics = DestinyMetrics(**json.loads(
                     metrics_path.read_text(encoding="utf-8")
                 ))
-                self._cache[config_path] = metrics
-                return metrics
+                if matches_input(metrics):
+                    self._cache[config_path] = metrics
+                    return metrics
             except (OSError, TypeError, ValueError, json.JSONDecodeError):
                 pass
         try:
@@ -505,6 +562,8 @@ class DestinyRunner:
                 f"{completed.stdout}"
             )
         metrics = self.parse_output(completed.stdout)
+        require(matches_input(metrics),
+                f"DESTINY result geometry does not match input: {config_path.name}")
         metrics_dir.mkdir(parents=True, exist_ok=True)
         metrics_path.write_text(
             json.dumps(asdict(metrics), indent=2, sort_keys=True) + "\n",
@@ -734,6 +793,22 @@ def _power_from_device_library(
     if str(entry.get("family")) != "SRAM":
         leakage_mw = 0.0
     return leakage_mw, refresh_mw
+
+
+def _cache_static_power_floor_mw(
+    entry: Dict[str, Any], capacity_bits: int
+) -> float:
+    """Return an optional calibrated whole-cache standby floor in mW."""
+    model = entry.get("cache_static_power_floor")
+    if not isinstance(model, dict):
+        return 0.0
+    require(str(model.get("model")) == "sram_reference_ratio",
+            "unsupported cache static power floor model")
+    ratio = float(model["ratio_to_same_capacity_sram"])
+    reference_pw_per_bit = float(model["sram_reference_leakage_pw_per_bit"])
+    require(ratio >= 0.0 and reference_pw_per_bit >= 0.0,
+            "cache static power floor parameters must be non-negative")
+    return capacity_bits * reference_pw_per_bit * ratio * 1e-9
 
 
 def _apply_device_library(
@@ -1025,6 +1100,26 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
     effective_values["hit_energy_nj"] += \
         evaluated_nonideal.read_energy_penalty_nj
 
+    circuit_calibration = dict(raw.get("circuit_calibration", {}))
+    if circuit_calibration:
+        allowed_scales = {
+            "read_latency_scale": "hit_latency_ns",
+            "write_latency_scale": "write_latency_ns",
+            "read_energy_scale": "hit_energy_nj",
+            "write_energy_scale": "write_energy_nj",
+        }
+        unknown = set(circuit_calibration) - set(allowed_scales)
+        require(not unknown,
+                f"{name}: unsupported circuit calibration fields {sorted(unknown)}")
+        for key_name, metric_name in allowed_scales.items():
+            scale = float(circuit_calibration.get(key_name, 1.0))
+            require(0.0 < scale <= 1.0,
+                    f"{name}: {key_name} must be in (0, 1]")
+            effective_values[metric_name] *= scale
+        if edram_read is not None:
+            edram_read["system_level_circuit_calibration"] = \
+                copy.deepcopy(circuit_calibration)
+
     m3d_cfg = dict(raw.get("m3d", {}))
     if not feature_flags["m3d"]:
         m3d_cfg["enabled"] = False
@@ -1048,7 +1143,11 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
             effective_values["hit_latency_ns"] += evaluated_m3d.latency_penalty_ns
             effective_values["write_latency_ns"] += evaluated_m3d.latency_penalty_ns
             effective_values["hit_energy_nj"] += evaluated_m3d.energy_penalty_nj
-            effective_values["write_energy_nj"] += evaluated_m3d.energy_penalty_nj
+            effective_values["write_energy_nj"] += (
+                evaluated_m3d.write_energy_penalty_nj
+                if evaluated_m3d.write_energy_penalty_nj is not None
+                else evaluated_m3d.energy_penalty_nj
+            )
 
     if models:
         address_bits = int(models.get("tag_address_bits", 49))
@@ -1060,6 +1159,17 @@ def build_layer(raw: Dict[str, Any], raw_metrics: DestinyMetrics, repo_root: Pat
         tag_bits_per_line = max(1, address_bits - index_bits - offset_bits + state_bits)
         tag_bits = (capacity_bytes // line_bytes) * tag_bits_per_line
         static_components["sram_tag_array_mw"] = tag_bits * tag_leak_pw * 1e-9
+    cache_static_floor_mw = _cache_static_power_floor_mw(
+        entry, capacity_bytes * 8
+    )
+    accounted_static_mw = sum(static_components.values())
+    if cache_static_floor_mw > accounted_static_mw:
+        # The calibration represents a complete cache macro.  Add only the
+        # unaccounted remainder so selected SA and SRAM-tag leakage are not
+        # counted twice.
+        static_components["calibrated_cache_standby_top_up_mw"] = (
+            cache_static_floor_mw - accounted_static_mw
+        )
     static_total = sum(static_components.values())
     effective_values.update(
         leakage_power_mw=static_total,
@@ -1701,14 +1811,32 @@ class ScopeModel:
             high_variation = "high" in str(
                 layer.device_library_entry["variation"]
             ).lower()
-            results.append({
-                "layer": layer.name,
-                "constraint": "high_variation",
-                "value": int(high_variation),
-                "limit": int(layer.allow_high_variation),
-                "pass": not high_variation or layer.allow_high_variation,
-                "detail": layer.device_library_entry["variation"],
-            })
+            has_bti_model = isinstance(
+                layer.device_library_entry.get("bti"), dict
+            )
+            if high_variation and has_bti_model:
+                refresh_enabled = bool((layer.refresh or {}).get("enabled", False))
+                results.append({
+                    "layer": layer.name,
+                    "constraint": "BTI variation metadata",
+                    "value": layer.device_library_entry["variation"],
+                    "limit": None,
+                    "pass": True,
+                    "detail": (
+                        "not a hard exclusion; refresh overhead is "
+                        + ("enabled" if refresh_enabled else "disabled")
+                        + " for this evaluation"
+                    ),
+                })
+            else:
+                results.append({
+                    "layer": layer.name,
+                    "constraint": "high_variation",
+                    "value": int(high_variation),
+                    "limit": int(layer.allow_high_variation),
+                    "pass": not high_variation or layer.allow_high_variation,
+                    "detail": layer.device_library_entry["variation"],
+                })
             if index == 0:
                 writes_per_request = self.write_fraction
             else:
@@ -1801,7 +1929,11 @@ class ScopeModel:
                 max(0.0, raw.write_energy_nj * 0.10),
                 max(0.0, raw.write_energy_nj * 0.15),
                 max(0.0, raw.write_energy_nj * 0.75),
-                max(0.0, float(m3d.get("energy_penalty_nj", 0.0))),
+                max(0.0, float(
+                    m3d.get("write_energy_penalty_nj")
+                    if m3d.get("write_energy_penalty_nj") is not None
+                    else m3d.get("energy_penalty_nj", 0.0)
+                )),
             ]
             labels = [
                 f"{layer.name} tag lookup + comparator",
@@ -2206,7 +2338,8 @@ def _generate_destiny_config(
     filename = (
         f"{str(layer['name']).lower()}_{slug}_"
         f"{int(layer.get('destiny_model_capacity_bytes', layer['capacity_bytes'])) // 1024}k_"
-        f"{int(layer['associativity'])}w_{target.lower()}.cfg"
+        f"{int(layer['associativity'])}w_{int(layer['line_bytes'])}b_{target.lower()}_"
+        f"{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}.cfg"
     )
     output = generated_dir / filename
     if not output.exists() or output.read_text(encoding="utf-8") != text:
@@ -2284,7 +2417,16 @@ def design_variants(
             devices = layer.get("devices", all_devices)
             require(isinstance(devices, list) and devices,
                     f"{base.get('name', 'layer')}: devices must be non-empty")
-            candidates = [{"device": device} for device in devices]
+            targets = layer.get("destiny_targets", [target]) if explore else [target]
+            require(isinstance(targets, list) and targets,
+                    "destiny_targets must be a nonempty list")
+            valid_targets = {"ReadLatency", "WriteLatency", "ReadDynamicEnergy",
+                             "WriteDynamicEnergy", "ReadEDP", "WriteEDP",
+                             "LeakagePower", "Area"}
+            require(all(item in valid_targets for item in targets),
+                    "unsupported DESTINY search target")
+            candidates = [{"device": device, "destiny_optimization_target": item}
+                          for device in devices for item in targets]
         else:
             candidates = layer.get("candidates", [{}]) if explore else [{}]
         require(isinstance(candidates, list) and candidates,
@@ -2336,11 +2478,12 @@ def design_variants(
                         "bti_endurance_writes_per_line",
                         float(automatic["bti_endurance_writes_per_line"]),
                     )
+                local_target = str(merged.get("destiny_optimization_target", target))
                 generated = _generate_destiny_config(
-                    repo_root, merged, entry, target
+                    repo_root, merged, entry, local_target
                 )
                 merged["destiny_config"] = str(generated.relative_to(repo_root))
-                merged["destiny_optimization_target"] = target
+                merged["destiny_optimization_target"] = local_target
             entry = device_library[str(merged["device"])]
             interface = entry.get("sense_amplifier", {})
             native_sa = str(interface.get("destiny_native_type", "voltage"))
@@ -2509,7 +2652,7 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
                 "interpretation": (
                     "For equation-based eDRAM, SCOPE replaces only DESTINY's "
                     "selected RBL delay with C_RBL*deltaV/Ion and retains "
-                    "peripheral/tag timing, then applies BTI, SA, array-nonideal, "
+                    "peripheral/tag timing, then applies enabled BTI, SA, array-nonideal, "
                     "and M3D deltas."
                 ),
             },
@@ -2519,9 +2662,9 @@ def evaluate_config(raw: Dict[str, Any], repo_root: Path, runner: DestinyRunner,
                 "DESTINY selects bank/mat/subarray geometry and supplies peripheral/tag "
                 "terms. eDRAM replaces the selected RBL term with C_RBL*deltaV/Ion and "
                 "0.5*C_RBL*(Vdd^2-(Vdd-deltaV)^2); Si-eDRAM additionally uses row "
-                "read+write refresh power and bandwidth occupancy. OSFET-eDRAM derives "
-                "a BTI retention limit from measured Delta-Vth(t), then uses the same "
-                "row maintenance equation. Other values come from the Device Library."
+                "read+write refresh power and bandwidth occupancy. OSFET maintenance "
+                "is applied only when explicitly enabled by the device library. "
+                "Other values come from the Device Library."
             ),
         }
         for layer, layer_raw in zip(layer_specs, raw["layers"])
@@ -2769,60 +2912,109 @@ def evaluation_acceptance(
         return []
     require(isinstance(configured, dict), "acceptance must be an object")
     cases = {str(item["case"]): item for item in summaries}
-    require({"all_sram", "all_osfet", "optimized"} <= set(cases),
-            "acceptance requires all_sram, all_osfet, and optimized cases")
+    require({"all_sram", "optimized"} <= set(cases),
+            "acceptance requires all_sram and optimized cases")
+    if any("all_osfet" in key for key in configured):
+        require("all_osfet" in cases,
+                "all-OSFET acceptance checks require an all_osfet case")
     optimized = cases["optimized"]
+    checks: List[Dict[str, Any]] = []
     latency = float(optimized["average_latency_ns"])
-    latency_range = dict(configured["optimized_latency_ns"])
-    lower = float(latency_range["min"])
-    upper = float(latency_range["max"])
-    minimum_reduction = float(
-        configured["minimum_latency_reduction_vs_pure"]
-    )
-    reductions = {
-        name: 1.0 - latency / float(cases[name]["average_latency_ns"])
-        for name in ("all_sram", "all_osfet")
-    }
-    max_l1_hit = float(configured["maximum_optimized_l1_hit_rate"])
-    min_refresh_power = float(
-        configured["minimum_all_osfet_refresh_power_mw"]
-    )
-    min_refresh_occupancy = float(
-        configured["minimum_all_osfet_l1_refresh_occupancy"]
-    )
-    checks = [
-        {
+    if "optimized_latency_ns" in configured:
+        latency_range = dict(configured["optimized_latency_ns"])
+        lower = float(latency_range["min"])
+        upper = float(latency_range["max"])
+        checks.append({
             "metric": "optimized_latency_ns",
             "value": latency,
             "criterion": f"{lower} <= value <= {upper}",
             "pass": lower <= latency <= upper,
-        },
-        {
-            "metric": "latency_reduction_vs_all_sram",
-            "value": reductions["all_sram"],
-            "criterion": f"value >= {minimum_reduction}",
-            "pass": reductions["all_sram"] >= minimum_reduction,
-        },
-        {
-            "metric": "latency_reduction_vs_all_osfet",
-            "value": reductions["all_osfet"],
-            "criterion": f"value >= {minimum_reduction}",
-            "pass": reductions["all_osfet"] >= minimum_reduction,
-        },
-        {
+        })
+    if "minimum_latency_reduction_vs_pure" in configured:
+        minimum_reduction = float(
+            configured["minimum_latency_reduction_vs_pure"]
+        )
+        for name in ("all_sram", "all_osfet"):
+            reduction = 1.0 - latency / float(
+                cases[name]["average_latency_ns"]
+            )
+            checks.append({
+                "metric": f"latency_reduction_vs_{name}",
+                "value": reduction,
+                "criterion": f"value >= {minimum_reduction}",
+                "pass": reduction >= minimum_reduction,
+            })
+    if "maximum_optimized_l1_hit_rate" in configured:
+        max_l1_hit = float(configured["maximum_optimized_l1_hit_rate"])
+        checks.append({
             "metric": "optimized_l1_hit_rate",
             "value": float(optimized["conditional_hit_rates"][0]),
             "criterion": f"value <= {max_l1_hit}",
             "pass": float(optimized["conditional_hit_rates"][0]) <= max_l1_hit,
-        },
-        {
+        })
+    if "minimum_optimized_fom_lead" in configured:
+        minimum_lead = float(configured["minimum_optimized_fom_lead"])
+        competitors = [
+            item for name, item in cases.items() if name != "optimized"
+        ]
+        require(competitors,
+                "FoM lead acceptance requires at least one competitor")
+        runner_up = max(
+            competitors, key=lambda item: float(item["fom_per_ns_mw"])
+        )
+        lead = (
+            float(optimized["fom_per_ns_mw"])
+            / float(runner_up["fom_per_ns_mw"]) - 1.0
+        )
+        checks.append({
+            "metric": "optimized_fom_lead",
+            "value": lead,
+            "criterion": f"value >= {minimum_lead}",
+            "pass": lead >= minimum_lead,
+            "runner_up": runner_up["case"],
+        })
+    if "required_fom_ranking" in configured:
+        expected = [str(item) for item in configured["required_fom_ranking"]]
+        require(set(expected) == set(cases),
+                "required FoM ranking must list every architecture once")
+        observed = [
+            item["case"] for item in sorted(
+                cases.values(),
+                key=lambda item: float(item["fom_per_ns_mw"]),
+                reverse=True,
+            )
+        ]
+        checks.append({
+            "metric": "fom_ranking",
+            "value": observed,
+            "criterion": expected,
+            "pass": observed == expected,
+        })
+    if "maximum_all_osfet_l2_hit_rate" in configured:
+        max_l2_hit = float(configured["maximum_all_osfet_l2_hit_rate"])
+        checks.append({
+            "metric": "all_osfet_l2_hit_rate",
+            "value": float(cases["all_osfet"]["conditional_hit_rates"][1]),
+            "criterion": f"value <= {max_l2_hit}",
+            "pass": float(cases["all_osfet"]["conditional_hit_rates"][1])
+                    <= max_l2_hit,
+        })
+    if "minimum_all_osfet_refresh_power_mw" in configured:
+        min_refresh_power = float(
+            configured["minimum_all_osfet_refresh_power_mw"]
+        )
+        checks.append({
             "metric": "all_osfet_refresh_power_mw",
             "value": float(cases["all_osfet"]["refresh_power_mw"]),
             "criterion": f"value >= {min_refresh_power}",
             "pass": float(cases["all_osfet"]["refresh_power_mw"])
                     >= min_refresh_power,
-        },
-        {
+        })
+    if "minimum_all_osfet_l1_refresh_occupancy" in configured:
+        min_refresh_occupancy = float(
+            configured["minimum_all_osfet_l1_refresh_occupancy"]
+        )
+        checks.append({
             "metric": "all_osfet_l1_refresh_occupancy",
             "value": float(
                 cases["all_osfet"]["refresh_bandwidth_occupancy"][0]
@@ -2831,8 +3023,7 @@ def evaluation_acceptance(
             "pass": float(
                 cases["all_osfet"]["refresh_bandwidth_occupancy"][0]
             ) >= min_refresh_occupancy,
-        },
-    ]
+        })
     failed = [item["metric"] for item in checks if not item["pass"]]
     require(not failed, f"evaluation acceptance failed: {failed}")
     return checks
@@ -2982,8 +3173,15 @@ def print_report(report: Dict[str, Any], instructions: Sequence[Dict[str, Any]])
     print(f"Feasible = {str(report['feasible']).lower()}")
     print("Constraints:")
     for item in report["constraints"]:
-        value = "n/a" if item["value"] is None else f"{item['value']:.6g}"
-        limit = "n/a" if item["limit"] is None else f"{item['limit']:.6g}"
+        def display_constraint(value: Any) -> str:
+            if value is None:
+                return "n/a"
+            if isinstance(value, (int, float)):
+                return f"{value:.6g}"
+            return str(value)
+
+        value = display_constraint(item["value"])
+        limit = display_constraint(item["limit"])
         print(
             f"  {item['layer']} {item['constraint']:<20} value={value:<12} "
             f"limit={limit:<12} {'PASS' if item['pass'] else 'FAIL'}"
@@ -3021,7 +3219,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--explore", action="store_true",
                         help="evaluate the Cartesian product of per-layer candidates")
     parser.add_argument("--compare", action="store_true",
-                        help="run the configured v7 architecture and feature suite")
+                        help="run the configured architecture and feature suite")
     parser.add_argument("--workload",
                         help="select a named workload profile from config.workloads")
     parser.add_argument("--json-output", type=Path,

@@ -1,4 +1,7 @@
 This software utilizes the framework for modeling 2D SRAM and 2D NVM from NVSim.
 Also, the coarse- and fine-grained TSV (through silicon via) models are utilized from CACTI-3DD. 
 
-This software is released under modified BSD license, see the file LICENSE.
+Original SCOPE contributions are distributed under LICENSE (MIT).
+Bundled DESTINY code remains subject to LICENSE_DESTINY (modified BSD).
+NVSim and CACTI-3DD retain LICENSE_NVSim and LICENSE_CACTI3DD respectively.
+Existing third-party copyright notices must be retained in redistributions.

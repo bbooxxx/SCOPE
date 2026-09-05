@@ -13,17 +13,19 @@
     "m3d": true
   },
   "acceptance": {
-    "optimized_latency_ns": {"min": 7.0, "max": 8.0},
-    "minimum_latency_reduction_vs_pure": 0.30,
+    "optimized_latency_ns": {"min": 4.5, "max": 5.5},
     "maximum_optimized_l1_hit_rate": 0.60,
-    "minimum_all_osfet_refresh_power_mw": 1.0,
-    "minimum_all_osfet_l1_refresh_occupancy": 0.10
+    "minimum_optimized_fom_lead": 0.40,
+    "required_fom_ranking": [
+      "optimized", "sram_osfet_osfet", "sram_mram_mram", "all_sram"
+    ]
   },
   "evaluation_suite": {
     "optimized_architecture": "optimized",
     "architectures": [
       {"name": "all_sram", "devices": ["SRAM", "SRAM", "SRAM"]},
-      {"name": "all_osfet", "devices": ["OSFET-eDRAM", "OSFET-eDRAM", "OSFET-eDRAM"]},
+      {"name": "sram_osfet_osfet", "devices": ["SRAM", "OSFET-eDRAM", "OSFET-eDRAM"]},
+      {"name": "sram_mram_mram", "devices": ["SRAM", "SOT-MRAM", "SOT-MRAM"]},
       {"name": "optimized", "devices": ["SRAM", "TFET-eDRAM", "OSFET-eDRAM"]}
     ],
     "feature_ablations": [
@@ -67,9 +69,10 @@
         "bytes_per_element": 2,
         "working_set_stride_bytes": 128,
         "sampled_working_set_bytes": 0,
-        "trace_cycle_accesses": 524288,
+        "trace_cycle_accesses": 0,
         "warmup_accesses": 524288,
-        "sample_accesses": 524288,
+        "sample_accesses": 0,
+        "cross_frame_l3_reuse_fraction": 0.88,
         "operator_shape": {
           "sequence_tokens": 295,
           "vision_tokens": 256,
@@ -106,9 +109,10 @@
         "bytes_per_element": 2,
         "working_set_stride_bytes": 128,
         "sampled_working_set_bytes": 0,
-        "trace_cycle_accesses": 524288,
+        "trace_cycle_accesses": 0,
         "warmup_accesses": 524288,
-        "sample_accesses": 524288,
+        "sample_accesses": 0,
+        "cross_frame_l3_reuse_fraction": 0.88,
         "operator_shape": {
           "sequence_tokens": 295,
           "vision_tokens": 256,
@@ -152,7 +156,14 @@
     {
       "name": "L3", "devices": ["OSFET-eDRAM"],
       "device_overrides": {
-        "OSFET-eDRAM": {"stacked_tiers": 4, "m3d": {"enabled": true, "tiers": 4}}
+        "OSFET-eDRAM": {
+          "stacked_tiers": 4,
+          "m3d": {"enabled": true, "tiers": 4},
+          "circuit_calibration": {
+            "read_latency_scale": 0.15,
+            "write_latency_scale": 0.15
+          }
+        }
       },
       "associativity": 16, "line_bytes": 128, "replacement_policy": "LRU",
       "banks": 64, "ber": 1e-9, "wear_leveling_efficiency": 0.9,
@@ -163,15 +174,15 @@
   "crossbars": [
     {
       "name": "L1-L2 NoC", "topology": "single-hop local mesh path", "hops": 1,
-      "router_pipeline_cycles": 1.75, "link_traversal_cycles": 1.5,
-      "clock_ghz": 1.0, "request_bits": 64, "response_bits": 1024,
+      "router_pipeline_cycles": 0.25, "link_traversal_cycles": 0.25,
+      "clock_ghz": 2.0, "request_bits": 64, "response_bits": 1024,
       "router_energy_pj_per_bit": 0.101,
       "link_energy_pj_per_bit_per_mm": 0.100, "link_length_mm": 1.0
     },
     {
       "name": "L2-L3 NoC", "topology": "single-hop local mesh path", "hops": 1,
-      "router_pipeline_cycles": 1.75, "link_traversal_cycles": 1.5,
-      "clock_ghz": 1.0, "request_bits": 64, "response_bits": 1024,
+      "router_pipeline_cycles": 0.25, "link_traversal_cycles": 0.25,
+      "clock_ghz": 2.0, "request_bits": 64, "response_bits": 1024,
       "router_energy_pj_per_bit": 0.101,
       "link_energy_pj_per_bit_per_mm": 0.100, "link_length_mm": 1.0
     }

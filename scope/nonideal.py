@@ -214,7 +214,15 @@ def evaluate_nonideal(
         ir_power_w = real_a * real_a * wire_r
         ir_energy_nj = ir_power_w * pulse_ns * 1e-9 * line_bits * 1e9
         signal_v = float(cfg.get("sense_signal_mv", 100.0)) * 1e-3 * current_ratio
-        effective_ber = max(nominal_ber, _gaussian_tail(signal_v, noise_sigma_v))
+        ber_model = str(cfg.get("ber_model", "sa_gaussian_tail"))
+        if ber_model == "nominal":
+            effective_ber = nominal_ber
+        elif ber_model == "sa_gaussian_tail":
+            effective_ber = max(
+                nominal_ber, _gaussian_tail(signal_v, noise_sigma_v)
+            )
+        else:
+            raise ValueError(f"unsupported MRAM BER model: {ber_model}")
         return NonidealResult(
             enabled=True, mechanism="MRAM word/bit-line IR drop and STT read disturb",
             r0_ohm_per_cell=r0, r1_ohm_per_cell=r1,
@@ -235,6 +243,10 @@ def evaluate_nonideal(
             read_disturb_current_limited=current_limited,
             nominal_ber=nominal_ber, effective_ber=effective_ber,
             reliability_model=(
+                "MRAM BER uses the configured nominal value; series-line "
+                "current derating still affects latency/energy, and the STT "
+                "thermal-activation model independently limits read current"
+                if ber_model == "nominal" else
                 "series-line current derating; STT thermal-activation switching "
                 "probability limits read current (write current is unchanged)"
             ),

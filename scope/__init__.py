@@ -3,6 +3,7 @@
 from .core import *  # noqa: F401,F403
 from .core import (  # Compatibility for the v2 unit-test/public helper surface.
     _apply_device_library,
+    _cache_static_power_floor_mw,
     _guided_destiny_target,
     _power_from_device_library,
 )

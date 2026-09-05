@@ -1,0 +1,14 @@
+name: Bug report
+description: Report a reproducible SCOPE issue
+body:
+  - type: textarea
+    attributes:
+      label: Command and configuration
+      description: Include the exact command, OS, Python/compiler version and relevant configuration.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true

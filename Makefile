@@ -47,8 +47,12 @@ $(model_target): $(MODEL_OBJ)
 clean:
 	$(RM) $(target) $(model_target) $(DEP) $(OBJ) $(MODEL_OBJ)
 
-scope: all
-	python3 scope.py config/scope_v3.json --json-output results/scope_v3.json
+scope: scope-v9
+
+.PHONY: scope-v9
+scope-v9: all
+	python3 scope.py config/scope_v9.json --compare --json-output results/scope_v9_attention.json
+	python3 scope.py config/scope_v9.json --workload ffn --compare --json-output results/scope_v9_ffn.json
 
 scope-v4: all
 	python3 scope.py config/scope_v4.json --explore --json-output results/scope_v4_attention.json
@@ -75,13 +79,13 @@ scope-requested: all
 test-scope: $(model_target)
 	python3 -m unittest discover -s tests -v
 
-$(OUTDIR)/main.o: main.cpp
+$(OUTDIR)/main.o: main.cpp | dir
 	$(CXX) $(CXXFLAGS) $(DBG) $(INC) -c $< -o $@
 
-$(OUTDIR)/%.o: component/%.cpp
+$(OUTDIR)/%.o: component/%.cpp | dir
 	$(CXX) $(CXXFLAGS) $(DBG) $(INC) -c $< -o $@
 
-$(OUTDIR)/model_%.o: model/%.cpp
+$(OUTDIR)/model_%.o: model/%.cpp | dir
 	$(CXX) $(CXXFLAGS) $(DBG) $(INC) -c $< -o $@
 
 depend $(DEP):

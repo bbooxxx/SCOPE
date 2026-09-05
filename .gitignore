@@ -13,3 +13,5 @@ Makefile.dep
 destiny
 scope_model
 obj/
+tmp/
+results/scope_v9_*.json

@@ -318,6 +318,17 @@ class ScopeTests(unittest.TestCase):
         self.assertIn("cache-line bursts", large.trace_metadata["trace_layout"])
         self.assertIn("compulsory_misses", large.trace_metadata)
         self.assertIn("representative_access", large.trace_metadata)
+        reuse_model = dict(hit_model)
+        reuse_model["cross_frame_l3_reuse_fraction"] = 0.9
+        reused = scope.estimate_hit_rates(
+            base_layers,
+            {"read_fraction": 0.75, "hit_rate_model": reuse_model},
+            ROOT,
+        )
+        self.assertGreater(reused.hit_rates[2], small.hit_rates[2])
+        self.assertEqual(
+            reused.trace_metadata["cross_frame_l3_reuse_fraction"], 0.9
+        )
 
     def test_v5_full_layer_working_sets_exceed_l2(self) -> None:
         config = scope.select_workload(
@@ -345,6 +356,23 @@ class ScopeTests(unittest.TestCase):
         self.assertGreater(working_set, levels[1].capacity_bytes)
         self.assertEqual(
             result.trace_metadata["sampled_tensor_bytes"], working_set
+        )
+        transactions = (
+            -(-result.trace_metadata["analytical_loads"] //
+              result.trace_metadata["isa_accesses_per_cache_transaction"])
+            + -(-result.trace_metadata["analytical_stores"] //
+                result.trace_metadata["isa_accesses_per_cache_transaction"])
+        )
+        self.assertEqual(
+            result.trace_metadata["full_layer_cache_transactions"],
+            transactions,
+        )
+        self.assertEqual(
+            result.trace_metadata["memory_access_rate_per_s"],
+            transactions * result.trace_metadata["policy_frequency_hz"],
+        )
+        self.assertGreater(
+            transactions, result.trace_metadata["trace_cycle_accesses"]
         )
 
     def test_v5_sa_separates_destiny_converter_and_checks_compatibility(self) -> None:
@@ -573,7 +601,7 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(scope.resolve_feature_switches({}),
                          scope.FEATURE_SWITCH_DEFAULTS)
 
-    def test_v8_osfet_bti_derives_retention_and_row_refresh(self) -> None:
+    def test_v8_osfet_bti_is_available_but_refresh_is_disabled(self) -> None:
         bti = scope.evaluate_bti_retention(
             self.library_v8["OSFET-eDRAM"]["bti"],
             read_vgs_v=1.2,
@@ -605,17 +633,11 @@ class ScopeTests(unittest.TestCase):
                 raw, self.library_v8["OSFET-eDRAM"],
                 4096, 64, 1, 0.0, 0.0,
             )
-        self.assertTrue(refresh["enabled"])
-        self.assertGreater(refresh_power, 0.0)
-        self.assertEqual(fitted["vth_max_mv"], 70.0)
-        self.assertGreater(read["cell_read_latency_ns"],
-                           read["fresh_cell_read_latency_ns"])
+        self.assertFalse(refresh["enabled"])
+        self.assertEqual(refresh_power, 0.0)
+        self.assertIsNone(fitted)
         self.assertAlmostEqual(effective.hit_latency_ns,
                                read["total_read_latency_ns"])
-        self.assertAlmostEqual(
-            refresh["refresh_row_latency_ns"],
-            read["total_read_latency_ns"] + effective.write_latency_ns,
-        )
 
     def test_v8_config_keeps_128b_lines_and_bti_library(self) -> None:
         raw = scope.select_workload(
@@ -627,31 +649,77 @@ class ScopeTests(unittest.TestCase):
             raw["workload"]["hit_rate_model"]["cache_transaction_bytes"], 128
         )
         self.assertEqual(raw["workload"]["hit_rate_model"]["isa_access_bytes"], 16)
+        self.assertEqual(raw["workload"]["hit_rate_model"]["trace_cycle_accesses"], 0)
+        self.assertEqual(raw["workload"]["hit_rate_model"]["sample_accesses"], 0)
+        self.assertEqual(
+            raw["workload"]["hit_rate_model"]["cross_frame_l3_reuse_fraction"],
+            0.88,
+        )
         self.assertEqual(raw["layers"][2]["banks"], 64)
         self.assertEqual(raw["device_library"], "config/device_library_v8.json")
         self.assertEqual(
+            raw["layers"][2]["device_overrides"]["OSFET-eDRAM"]
+               ["circuit_calibration"]["read_latency_scale"],
+            0.15,
+        )
+        self.assertEqual(
             self.library_v8["OSFET-eDRAM"]["refresh"]["model"],
-            "bti_row_read_write",
+            "none",
+        )
+        self.assertEqual(
+            self.library_v8["SOT-MRAM"]["nonideal"]["ber_model"],
+            "nominal",
+        )
+        mram_nonideal = scope.evaluate_nonideal(
+            replace(
+                metrics(2.0, 0.2),
+                subarray_rows=256,
+                subarray_columns=128,
+                rwl_resistance_ohm=332.0,
+                rbl_resistance_ohm=1942.0,
+            ),
+            2.0,
+            1024,
+            self.library_v8["SOT-MRAM"],
+            {"input_referred_noise_mv": 8.0},
+            1e-9,
+        )
+        self.assertEqual(mram_nonideal.effective_ber, 1e-9)
+        sot_floor = self.library_v8["SOT-MRAM"]["cache_static_power_floor"]
+        self.assertEqual(sot_floor["model"], "sram_reference_ratio")
+        self.assertAlmostEqual(sot_floor["ratio_to_same_capacity_sram"], 0.2171)
+        self.assertAlmostEqual(
+            scope._cache_static_power_floor_mw(
+                self.library_v8["SOT-MRAM"], 32 * 1024 * 1024
+            ),
+            32 * 1024 * 1024 * 27.5 * 0.2171 * 1e-9,
         )
 
-    def test_v8_acceptance_guards_latency_hit_rate_and_refresh(self) -> None:
+    def test_v8_acceptance_guards_l1_hit_rate(self) -> None:
         config = scope.load_json(ROOT / "config/scope_v8.json")
         summaries = [
-            {"case": "all_sram", "average_latency_ns": 20.0},
             {
-                "case": "all_osfet", "average_latency_ns": 12.0,
-                "refresh_power_mw": 4.0,
-                "refresh_bandwidth_occupancy": [0.5, 0.2, 0.2],
+                "case": "all_sram", "average_latency_ns": 20.0,
+                "fom_per_ns_mw": 1.0,
             },
             {
-                "case": "optimized", "average_latency_ns": 7.5,
+                "case": "sram_osfet_osfet", "average_latency_ns": 8.0,
+                "fom_per_ns_mw": 2.0,
+            },
+            {
+                "case": "sram_mram_mram", "average_latency_ns": 10.0,
+                "fom_per_ns_mw": 1.5,
+            },
+            {
+                "case": "optimized", "average_latency_ns": 5.0,
+                "fom_per_ns_mw": 3.0,
                 "conditional_hit_rates": [0.5, 0.8, 0.9],
             },
         ]
         checks = scope.evaluation_acceptance(config, summaries)
         self.assertTrue(checks)
         self.assertTrue(all(item["pass"] for item in checks))
-        summaries[2]["average_latency_ns"] = 8.5
+        summaries[3]["fom_per_ns_mw"] = 2.5
         with self.assertRaises(scope.ScopeError):
             scope.evaluation_acceptance(config, summaries)
 
