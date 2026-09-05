@@ -31,6 +31,7 @@ from .m3d import evaluate_m3d
 from .nonideal import evaluate_nonideal
 from .openvla_trace import build_trace, repeated
 from .sense_amp import evaluate_sense_amp
+from .power import access_power_mw, legacy_v9_activity_counts
 
 
 FLOAT_RE = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
@@ -243,6 +244,8 @@ class HitRateResult:
     offchip_writebacks_per_request: float
     observed_read_fraction: float
     trace_metadata: Optional[Dict[str, Any]] = None
+    load_path_counts: Tuple[int, ...] = ()
+    store_path_counts: Tuple[int, ...] = ()
 
 
 @dataclass
@@ -337,6 +340,11 @@ def _cpp_openvla_hit_rates(
     policies = tuple(layer.replacement_policy for layer in layers)
     line_bytes = layers[0].line_bytes
     operator = str(model["operator"]).lower()
+    trace_kind = str(model.get("trace_kind", "legacy_synthetic"))
+    require(trace_kind in {"tiled", "legacy_synthetic"}, "invalid trace_kind")
+    group_m = int(model.get("group_m", 8))
+    indexing = str(model.get("indexing", "modulo"))
+    require(indexing in {"modulo", "xor_fold"}, "invalid cache indexing")
     sampled_working_set_bytes = int(model["sampled_working_set_bytes"])
     warmup_accesses = int(model.get("warmup_accesses", 0))
     sample_accesses = int(model.get("sample_accesses", 0))
@@ -351,13 +359,25 @@ def _cpp_openvla_hit_rates(
     ))
     require(0.0 <= cross_frame_l3_reuse <= 1.0,
             "cross_frame_l3_reuse_fraction must be in [0, 1]")
-    key = (
-        operator, capacities, associativities, policies, line_bytes,
+    require(trace_kind != "tiled" or cross_frame_l3_reuse == 0.0,
+            "tiled trace cannot apply a post-hoc cross-frame hit-rate correction")
+    policy_hz = float(model.get("policy_frequency_hz", 5.0))
+    require(math.isfinite(policy_hz) and policy_hz > 0.0,
+            "policy_frequency_hz must be finite and positive")
+    power_activity_model = str(model.get(
+        "power_activity_model", "trace_transactions" if trace_kind == "tiled"
+        else "legacy_v9_analytical"))
+    require(power_activity_model in {"trace_transactions", "legacy_v9_analytical"},
+            "invalid power_activity_model")
+    trace_key = (
+        str(binary), binary.stat().st_mtime_ns, binary.stat().st_size,
+        operator, trace_kind, group_m, indexing, capacities, associativities, policies, line_bytes,
         sampled_working_set_bytes, warmup_accesses, sample_accesses,
         seed, access_bytes, transaction_bytes, bytes_per_element, stride_bytes,
         cycle_access_cap, cross_frame_l3_reuse,
         tuple(sorted((str(key), int(value)) for key, value in shape.items())),
     )
+    key = trace_key + (policy_hz, power_activity_model)
     cached = _CPP_HIT_RATE_CACHE.get(key)
     if cached is not None:
         return cached
@@ -365,6 +385,9 @@ def _cpp_openvla_hit_rates(
     arguments = [
         str(binary),
         "--operator", operator,
+        "--trace-kind", trace_kind,
+        "--group-m", str(group_m),
+        "--indexing", indexing,
         "--capacities", ",".join(str(value) for value in capacities),
         "--associativities", ",".join(str(value) for value in associativities),
         "--policies", ",".join(policies),
@@ -385,26 +408,31 @@ def _cpp_openvla_hit_rates(
         "--tile-n", str(shape.get("tile_n", shape.get("channel_tile", 64))),
         "--tile-k", str(shape.get("tile_k", 32)),
     ]
-    if warmup_accesses > 0:
+    if "warmup_accesses" in model:
         arguments.extend(["--warmup-accesses", str(warmup_accesses)])
     if sample_accesses > 0:
         arguments.extend(["--sample-accesses", str(sample_accesses)])
-    completed = subprocess.run(
-        arguments,
-        cwd=repo_root,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
+    trace_path = repo_root / "config" / ".scope-cache" / "traces" / (
+        hashlib.sha256(repr(trace_key).encode()).hexdigest() + ".json"
     )
-    if completed.returncode != 0:
-        raise ScopeError(f"C++ SCOPE model failed:\n{completed.stdout}")
-    try:
-        raw = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise ScopeError(
-            f"invalid JSON from C++ SCOPE model:\n{completed.stdout}"
-        ) from exc
+    raw = None
+    if trace_path.is_file():
+        try:
+            raw = json.loads(trace_path.read_text())
+        except (OSError, ValueError):
+            pass
+    if raw is None:
+        completed = subprocess.run(arguments, cwd=repo_root, text=True,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   check=False)
+        if completed.returncode != 0:
+            raise ScopeError(f"C++ SCOPE model failed:\n{completed.stdout}")
+        try:
+            raw = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise ScopeError(f"invalid JSON from C++ SCOPE model:\n{completed.stdout}") from exc
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        trace_path.write_text(json.dumps(raw) + "\n")
     trace_only_rates = tuple(float(value) for value in raw["hit_rates"])
     rates = trace_only_rates
     accesses = tuple(int(value) for value in raw["accesses"])
@@ -440,7 +468,6 @@ def _cpp_openvla_hit_rates(
             "hit_rates": list(rates),
             "hits": list(hits),
         })
-    policy_hz = float(model.get("policy_frequency_hz", 5.0))
     isa_accesses_per_transaction = int(
         raw["isa_accesses_per_cache_transaction"]
     )
@@ -450,6 +477,8 @@ def _cpp_openvla_hit_rates(
         math.ceil(int(raw["analytical_loads"]) / isa_accesses_per_transaction)
         + math.ceil(int(raw["analytical_stores"]) / isa_accesses_per_transaction)
     )
+    if trace_kind == "tiled":
+        full_layer_cache_transactions = int(raw["trace_cycle_accesses"])
     raw.update({
         "model": "OpenVLA-7B / Llama-2-7B",
         "source_model_config":
@@ -473,6 +502,35 @@ def _cpp_openvla_hit_rates(
         ),
         "policy_frequency_hz": policy_hz,
     })
+    if trace_kind == "tiled":
+        raw.update({
+            "trace_basis": "Complete grouped GEMM and causal FlashAttention global-memory transactions; not a GPU capture",
+            "selection": "One serialized CTA schedule; no injected hits or cross-frame probability",
+            "power_activity_basis": "Exact emitted cache transactions per complete operator multiplied by invocation frequency",
+            "measured_complete_operator": int(raw["sample_accesses"]) == full_layer_cache_transactions,
+            "cache_policy": "write-back/write-allocate, non-inclusive hierarchy; all global transactions probe L1",
+            "tensor_epoch_policy": "Repeated warmup uses the same address domain; warmup=0 is a cold operator",
+        })
+    activity_count = int(raw["trace_cycle_accesses"])
+    if power_activity_model == "legacy_v9_analytical":
+        counts = legacy_v9_activity_counts(
+            operator, raw["operator_shape"],
+            bytes_per_element=bytes_per_element, isa_bytes=access_bytes,
+            transaction_bytes=transaction_bytes)
+        activity_count = counts["total"]
+        raw["power_activity_counts"] = counts
+        raw["power_activity_basis"] = (
+            "Original v9 analytical activity budget (weights counted once), "
+            "multiplied by invocation frequency; a reduced-activity scenario, "
+            "not the power of the complete emitted tiled operator at that frequency. "
+            "Trace replay supplies conditional hit rates and per-request energy mix."
+        )
+    raw.update({
+        "power_activity_model": power_activity_model,
+        "power_activity_transactions_per_operator": activity_count,
+        "memory_access_rate_per_s": activity_count * policy_hz,
+    })
+    joint_counts_available = cross_frame_l3_reuse == 0 and "load_hits" in raw
     result = HitRateResult(
         hit_rates=rates,
         accesses=accesses,
@@ -483,6 +541,10 @@ def _cpp_openvla_hit_rates(
         ),
         observed_read_fraction=float(raw["observed_read_fraction"]),
         trace_metadata=raw,
+        load_path_counts=tuple(int(v) for v in raw["load_hits"]) + (int(raw["offchip_loads"]),)
+                         if joint_counts_available else (),
+        store_path_counts=tuple(int(v) for v in raw["store_hits"]) + (int(raw["offchip_stores"]),)
+                          if joint_counts_available else (),
     )
     _CPP_HIT_RATE_CACHE[key] = result
     return result
@@ -1611,64 +1673,64 @@ class ScopeModel:
             return 0.0
         return layer.device_refresh_power_mw
 
+    def _path_probabilities(self) -> List[Dict[str, Any]]:
+        names = [layer.name for layer in self.layers] + ["OFF"]
+        loads, stores = self.hit_rates.load_path_counts, self.hit_rates.store_path_counts
+        if loads or stores:
+            require(len(loads) == len(stores) == 4, "load/store path counts need four destinations")
+            require(all(v >= 0 for v in loads + stores), "negative path count")
+            total = sum(loads) + sum(stores)
+            require(total > 0, "empty measured trace")
+            require(total == self.hit_rates.accesses[0], "path counts do not conserve requests")
+            for i in range(3):
+                require(loads[i] + stores[i] == self.hit_rates.hits[i], "path counts do not match hits")
+            return [{"op": op, "hit_level": name, "probability": count / total,
+                     "count": count, "basis": "measured joint operation/destination counts"}
+                    for op, counts in (("load", loads), ("store", stores))
+                    for name, count in zip(names, counts)]
+        reach, probabilities = 1.0, []
+        for rate in self.hit_rates.hit_rates:
+            probabilities.append(reach * rate)
+            reach *= 1.0 - rate
+        probabilities.append(reach)
+        return [{"op": op, "hit_level": name, "probability": fraction * probability,
+                 "count": None, "basis": "operation/destination independence approximation (no joint trace counts)"}
+                for op, fraction in (("load", self.read_fraction), ("store", self.write_fraction))
+                for name, probability in zip(names, probabilities)]
+
     def average(self) -> Dict[str, Any]:
         reach = 1.0
-        latency_total = self.core_to_l1_latency_ns
+        latency_total = 0.0
         expected_dynamic_energy = 0.0
         latency_breakdown: List[Dict[str, Any]] = []
         dynamic_breakdown: List[Dict[str, Any]] = []
         reaches: List[float] = []
-
-        if self.core_to_l1_latency_ns:
-            latency_breakdown.append({
-                "component": "core->L1",
-                "reach_probability": 1.0,
-                "raw_latency_ns": self.core_to_l1_latency_ns,
-                "weighted_latency_ns": self.core_to_l1_latency_ns,
-            })
-
-        for index, layer in enumerate(self.layers):
+        for rate in self.hit_rates.hit_rates:
             reaches.append(reach)
-            access_latency = self._access_latency(layer)
-            access_energy = self._access_energy(layer)
-            noc_latency = 0.0 if index == 0 else self.crossbars[index - 1].latency_ns
-            noc_energy = 0.0 if index == 0 else self.crossbars[index - 1].energy_nj
-            weighted_latency = reach * (noc_latency + access_latency)
-            weighted_energy = reach * (noc_energy + access_energy)
-            latency_total += weighted_latency
-            expected_dynamic_energy += weighted_energy
+            reach *= 1.0 - rate
+        path_costs = []
+        service_time_ns = 0.0
+        for path in self._path_probabilities():
+            detail = self.instruction(path["op"], path["hit_level"])
+            probability = path["probability"]
+            latency = detail["latency_ns"]
+            energy = detail["dynamic_energy_nj"]
+            service_time_ns += probability * detail["serialized_service_time_ns"]
+            path_costs.append(dict(path, latency_ns=latency, dynamic_energy_nj=energy,
+                                   serialized_service_time_ns=detail["serialized_service_time_ns"],
+                                   access_dynamic_power_mw=detail["access_dynamic_power_mw"]))
+            latency_total += probability * latency
+            expected_dynamic_energy += probability * energy
             latency_breakdown.append({
-                "component": f"{layer.name} access" if index == 0 else
-                             f"{self.crossbars[index - 1].name} + {layer.name} access",
-                "reach_probability": reach,
-                "raw_latency_ns": noc_latency + access_latency,
-                "weighted_latency_ns": weighted_latency,
+                "component": f"{path['op']} -> {path['hit_level']}",
+                "reach_probability": probability, "raw_latency_ns": latency,
+                "weighted_latency_ns": probability * latency,
             })
             dynamic_breakdown.append({
-                "component": f"{layer.name} access" if index == 0 else
-                             f"{self.crossbars[index - 1].name} + {layer.name} access",
-                "reach_probability": reach,
-                "raw_energy_nj": noc_energy + access_energy,
-                "weighted_energy_nj": weighted_energy,
+                "component": f"{path['op']} -> {path['hit_level']} (including fills)",
+                "reach_probability": probability, "raw_energy_nj": energy,
+                "weighted_energy_nj": probability * energy,
             })
-            reach *= 1.0 - self.hit_rates.hit_rates[index]
-
-        offchip_latency = reach * self.offchip.latency_ns
-        offchip_energy = reach * self.offchip.energy_nj
-        latency_total += offchip_latency
-        expected_dynamic_energy += offchip_energy
-        latency_breakdown.append({
-            "component": "off-chip memory",
-            "reach_probability": reach,
-            "raw_latency_ns": self.offchip.latency_ns,
-            "weighted_latency_ns": offchip_latency,
-        })
-        dynamic_breakdown.append({
-            "component": "off-chip memory",
-            "reach_probability": reach,
-            "raw_energy_nj": self.offchip.energy_nj,
-            "weighted_energy_nj": offchip_energy,
-        })
 
         # Buffered dirty evictions are not placed on the demand critical path,
         # but their link and destination-write energy must contribute to Eavg.
@@ -1684,6 +1746,14 @@ class ScopeModel:
                 + layer.metrics.write_energy_nj
                 + layer.peripheral_energy_nj
             )
+            source = self.layers[index - 1]
+            source_read_energy = max(0.0, source.metrics.hit_energy_nj - source.metrics.miss_energy_nj)
+            raw_energy += source_read_energy
+            service_time_ns += writebacks_per_request * (
+                self._refresh_adjusted_latency(source, max(0.0, source.metrics.hit_latency_ns - source.metrics.miss_latency_ns))
+                + self.crossbars[index - 1].latency_ns
+                + self._refresh_adjusted_latency(layer, layer.metrics.write_latency_ns + layer.peripheral_latency_ns)
+            )
             weighted_energy = writebacks_per_request * raw_energy
             expected_dynamic_energy += weighted_energy
             dynamic_breakdown.append({
@@ -1692,21 +1762,31 @@ class ScopeModel:
                 "raw_energy_nj": raw_energy,
                 "weighted_energy_nj": weighted_energy,
                 "off_critical_path": True,
+                "source_data_read_energy_nj": source_read_energy,
             })
         if self.hit_rates.offchip_writebacks_per_request > 0.0:
+            source = self.layers[-1]
+            source_read_energy = max(0.0, source.metrics.hit_energy_nj - source.metrics.miss_energy_nj)
+            raw_wb_energy = self.offchip.energy_nj + source_read_energy
             weighted_energy = (
-                self.hit_rates.offchip_writebacks_per_request * self.offchip.energy_nj
+                self.hit_rates.offchip_writebacks_per_request * raw_wb_energy
+            )
+            service_time_ns += self.hit_rates.offchip_writebacks_per_request * (
+                self.offchip.latency_ns + self._refresh_adjusted_latency(source,
+                    max(0.0, source.metrics.hit_latency_ns - source.metrics.miss_latency_ns))
             )
             expected_dynamic_energy += weighted_energy
             dynamic_breakdown.append({
                 "component": "WB to off-chip memory",
                 "reach_probability": self.hit_rates.offchip_writebacks_per_request,
-                "raw_energy_nj": self.offchip.energy_nj,
+                "raw_energy_nj": raw_wb_energy,
                 "weighted_energy_nj": weighted_energy,
                 "off_critical_path": True,
             })
 
         access_rate = float(self.workload["memory_access_rate_per_s"])
+        require(math.isfinite(access_rate) and access_rate > 0.0,
+                "memory_access_rate_per_s must be finite and positive")
         dynamic_power_mw = access_rate * expected_dynamic_energy * 1e-6
         for item in dynamic_breakdown:
             item["power_mw"] = access_rate * item["weighted_energy_nj"] * 1e-6
@@ -1722,7 +1802,11 @@ class ScopeModel:
         static_power_mw = sum(item["power_mw"] for item in static_breakdown)
         refresh_power_mw = sum(item["power_mw"] for item in refresh_breakdown)
         total_power_mw = dynamic_power_mw + static_power_mw + refresh_power_mw
-        fom = 1.0 / (latency_total * total_power_mw) if total_power_mw > 0.0 else math.inf
+        access_dynamic_power_mw = access_power_mw(expected_dynamic_energy, service_time_ns)
+        power_metric = str(self.workload.get("power_metric", "system_average"))
+        require(power_metric in {"system_average", "single_access_dynamic"}, "invalid power_metric")
+        selected_power_mw = access_dynamic_power_mw if power_metric == "single_access_dynamic" else total_power_mw
+        fom = 1.0 / (latency_total * selected_power_mw) if selected_power_mw > 0.0 else math.inf
 
         constraints = self._constraints(tuple(reaches))
         feasible = all(item["pass"] for item in constraints)
@@ -1736,6 +1820,7 @@ class ScopeModel:
             )
             access_equations.append({
                 "layer": layer.name,
+                "scope": "Standalone global-mix reference, not used for hierarchy averaging; request_path_costs applies tag misses, RFO reads and fills separately",
                 "rho_r": self.read_fraction,
                 "rho_w": self.write_fraction,
                 "read_latency_ns": layer.metrics.hit_latency_ns,
@@ -1756,15 +1841,34 @@ class ScopeModel:
             "conditional_accesses": list(self.hit_rates.accesses),
             "conditional_hits": list(self.hit_rates.hits),
             "average_latency_ns": latency_total,
+            "latency_accounting": "Expected demand completion time from the same eight load/store paths used by instruction(); buffered fills affect energy, not load completion",
+            "request_path_costs": path_costs,
+            "global_hit_probabilities": [reaches[i] * self.hit_rates.hit_rates[i] for i in range(3)],
             "latency_breakdown": latency_breakdown,
             "expected_dynamic_energy_nj_per_request": expected_dynamic_energy,
+            "dynamic_energy_pj_per_request": expected_dynamic_energy * 1000.0,
+            "amortized_static_energy_pj_per_request": (static_power_mw + refresh_power_mw) * 1e9 / access_rate,
+            "memory_access_rate_per_s": access_rate,
             "dynamic_power_mw": dynamic_power_mw,
             "dynamic_power_breakdown": dynamic_breakdown,
             "static_power_mw": static_power_mw,
             "static_power_breakdown": static_breakdown,
             "refresh_power_mw": refresh_power_mw,
             "refresh_power_breakdown": refresh_breakdown,
-            "average_power_mw": total_power_mw,
+            "power_metric": power_metric,
+            "power_activity_model": (self.hit_rates.trace_metadata or {}).get("power_activity_model", "configured_rate"),
+            "power_activity_basis": (self.hit_rates.trace_metadata or {}).get("power_activity_basis", "Configured memory request rate"),
+            "average_power_mw": selected_power_mw,
+            "average_power_uw": selected_power_mw * 1000.0,
+            "system_average_power_mw": total_power_mw,
+            "single_access_dynamic_power_mw": access_dynamic_power_mw,
+            "single_access_dynamic_power_uw": access_dynamic_power_mw * 1000.0,
+            "serialized_service_time_ns_per_request": service_time_ns,
+            "single_access_power_definition": "sum(request-triggered dynamic energy including fills/dirty evictions) / sum(serialized physical service times); time-weighted access-window mean, excludes standby/refresh, not peak and not E/early-response latency",
+            "dynamic_power_uw": dynamic_power_mw * 1000.0,
+            "power_accounting": "Whole configured memory hierarchy plus transaction-dependent LPDDR/NoC energy, averaged at the stated operator invocation frequency; excludes GPU compute and uncharacterized LPDDR standby",
+            "average_load_latency_ns": sum(p["probability"] * p["latency_ns"] for p in path_costs if p["op"] == "load") / self.read_fraction if self.read_fraction else None,
+            "average_store_latency_ns": sum(p["probability"] * p["latency_ns"] for p in path_costs if p["op"] == "store") / self.write_fraction if self.write_fraction else None,
             "fom_per_ns_mw": fom,
             "feasible": feasible,
             "constraints": constraints,
@@ -1837,7 +1941,13 @@ class ScopeModel:
                     "pass": not high_variation or layer.allow_high_variation,
                     "detail": layer.device_library_entry["variation"],
                 })
-            if index == 0:
+            trace = self.hit_rates.trace_metadata or {}
+            if trace.get("fills") and self.hit_rates.load_path_counts:
+                writes_per_request = trace["fills"][index] / self.hit_rates.accesses[0]
+                writes_per_request += self.hit_rates.writebacks_per_request[index]
+                if index == 0:
+                    writes_per_request += self.hit_rates.store_path_counts[0] / self.hit_rates.accesses[0]
+            elif index == 0:
                 writes_per_request = self.write_fraction
             else:
                 estimated = self.hit_rates.writebacks_per_request[index]
@@ -2048,14 +2158,17 @@ class ScopeModel:
             })
 
         def add_path(layer: LayerSpec, kind: str, latency_ns: float,
-                     energy_nj: float, critical: bool = True) -> None:
+                     energy_nj: float, critical: bool = True, label: str = "") -> None:
             for item in self._scaled_path(layer, latency_ns, energy_nj, kind):
-                add(item["component"], item["latency_ns"], item["energy_nj"],
+                add((label + " / " if label else "") + item["component"], item["latency_ns"], item["energy_nj"],
                     critical=critical)
                 breakdown[-1]["raw_model_latency_weight_ns"] = \
                     item["raw_model_latency_weight_ns"]
                 breakdown[-1]["raw_model_energy_weight_nj"] = \
                     item["raw_model_energy_weight_nj"]
+            if layer.peripheral_latency_ns or layer.peripheral_energy_nj:
+                add(f"{layer.name} additional peripheral", self._refresh_adjusted_latency(
+                    layer, layer.peripheral_latency_ns), layer.peripheral_energy_nj, critical)
 
         if self.core_to_l1_latency_ns:
             add("core->L1", self.core_to_l1_latency_ns, 0.0)
@@ -2092,21 +2205,26 @@ class ScopeModel:
                         f"{layer.name} refill"
                 add_path(layer, "write", self._refresh_adjusted_latency(
                     layer, layer.metrics.write_latency_ns),
-                    layer.metrics.write_energy_nj, critical=critical)
+                    layer.metrics.write_energy_nj, critical=critical, label=label)
 
         latency_ns = sum(item["latency_ns"] for item in breakdown)
+        service_time_ns = sum(item["physical_latency_ns"] for item in breakdown)
         dynamic_energy_nj = sum(item["energy_nj"] for item in breakdown)
         static_power_mw = sum(layer.metrics.leakage_power_mw for layer in self.layers)
         refresh_power_mw = sum(self._refresh_power(layer) for layer in self.layers)
-        dynamic_power_mw = (
-            1000.0 * dynamic_energy_nj / latency_ns if latency_ns > 0.0 else 0.0
-        )
+        dynamic_power_mw = access_power_mw(dynamic_energy_nj, service_time_ns)
         return {
             "op": op,
             "hit_level": hit_level,
             "write_policy": "write-back + write-allocate",
             "latency_ns": latency_ns,
             "dynamic_energy_nj": dynamic_energy_nj,
+            "dynamic_energy_pj": dynamic_energy_nj * 1000.0,
+            "serialized_service_time_ns": service_time_ns,
+            "access_dynamic_power_mw": dynamic_power_mw,
+            "access_dynamic_power_uw": dynamic_power_mw * 1000.0,
+            "power_note": "Dynamic energy divided by serialized physical service time including fills; access-window mean, not peak. Conditional path excludes dirty evictions; average() adds observed eviction work separately.",
+            "component_breakdown_basis": "Normalized allocation of cache totals using DESTINY component weights, not independently calibrated waveforms; do not infer component peak power from these display slices",
             "serialized_dynamic_power_mw": dynamic_power_mw,
             "static_power_mw": static_power_mw,
             "refresh_power_mw": refresh_power_mw,
@@ -2302,6 +2420,22 @@ def _generate_destiny_config(
     text = _set_config_field(
         text, "-MemoryCellInputFile", f"../devices/{cell_match.group(1)}"
     )
+    if entry.get("sync_destiny_write_cell", False):
+        require(entry["write_energy"]["model"] == entry["write_latency"]["model"] == "constant",
+                "cell write synchronization requires constant energy and pulse duration")
+        cell_path = base_path.parent / cell_match.group(1)
+        cell_text = cell_path.read_text(encoding="utf-8")
+        for operation in ("Set", "Reset"):
+            cell_text = _set_config_field(cell_text, f"-{operation}Energy (pJ)",
+                                         float(entry["write_energy"]["value_fj_per_bit"]) / 1000.0)
+            cell_text = _set_config_field(cell_text, f"-{operation}Pulse (ns)",
+                                         float(entry["write_latency"]["value_ns"]))
+        cell_dir = repo_root / "config" / ".scope-cache"
+        cell_dir.mkdir(parents=True, exist_ok=True)
+        generated_cell = cell_dir / (cell_path.stem + "_" + hashlib.sha256(cell_text.encode()).hexdigest()[:12] + ".cell")
+        if not generated_cell.exists():
+            generated_cell.write_text(cell_text, encoding="utf-8")
+        text = _set_config_field(text, "-MemoryCellInputFile", generated_cell.name)
     text = _set_config_field(
         text, "-Capacity (KB)",
         int(layer.get("destiny_model_capacity_bytes", layer["capacity_bytes"])) // 1024
@@ -2879,6 +3013,12 @@ def comparison_summary(case_id: str, report: Dict[str, Any]) -> Dict[str, Any]:
         ],
         "average_latency_ns": report["average_latency_ns"],
         "average_power_mw": report["average_power_mw"],
+        "power_metric": report.get("power_metric", "system_average"),
+        "power_activity_model": report.get("power_activity_model", "configured_rate"),
+        "memory_access_rate_per_s": report.get("memory_access_rate_per_s"),
+        "system_average_power_mw": report.get("system_average_power_mw", report["average_power_mw"]),
+        "single_access_dynamic_power_uw": report.get("single_access_dynamic_power_uw"),
+        "dynamic_energy_pj_per_request": report.get("dynamic_energy_pj_per_request"),
         "fom_per_ns_mw": report["fom_per_ns_mw"],
         "capacities_bytes": [
             layer["capacity_bytes"] for layer in report["layers"]
@@ -3100,6 +3240,8 @@ def print_comparison(report: Dict[str, Any]) -> None:
         f"SCOPE comparison [workload={report['selected_workload']}]"
     )
     print("=" * 120)
+    basis = report["architecture_comparison"][0].get("power_metric", "system_average")
+    print(f"Power basis: {basis}")
     print("Architecture comparison:")
     for item in report["architecture_comparison"]:
         capacities = "/".join(str(value // 1024) for value in item["capacities_bytes"])
@@ -3154,7 +3296,7 @@ def print_report(report: Dict[str, Any], instructions: Sequence[Dict[str, Any]])
         )
     print(f"  {'TOTAL':<30} {report['average_latency_ns']:.6f} ns")
 
-    print("\nAverage power breakdown:")
+    print("\nLong-term memory-system power at the configured invocation frequency:")
     for item in report["dynamic_power_breakdown"]:
         print(f"  dynamic {item['component']:<22} {item['power_mw']:.9g} mW")
     for item in report["static_power_breakdown"]:
@@ -3164,7 +3306,11 @@ def print_report(report: Dict[str, Any], instructions: Sequence[Dict[str, Any]])
     print(f"  {'DYNAMIC TOTAL':<31} {report['dynamic_power_mw']:.9g} mW")
     print(f"  {'STATIC TOTAL':<31} {report['static_power_mw']:.9g} mW")
     print(f"  {'REFRESH TOTAL':<31} {report['refresh_power_mw']:.9g} mW")
-    print(f"  {'POWER TOTAL':<31} {report['average_power_mw']:.9g} mW")
+    print(f"  {'SYSTEM POWER TOTAL':<31} {report['system_average_power_mw']:.9g} mW")
+    print(f"\nSingle-access dynamic energy = {report['dynamic_energy_pj_per_request']:.6f} pJ")
+    print(f"Serialized physical service time = {report['serialized_service_time_ns_per_request']:.6f} ns")
+    print(f"Power = {report['average_power_mw']:.6f} mW")
+    print(f"FoM power basis = {report['power_metric']}")
     print(f"\nClassic latency*power FoM = {report['fom_per_ns_mw']:.12g} 1/(ns*mW)")
     print(
         f"Guidance '{report['guidance']['name']}' score = "

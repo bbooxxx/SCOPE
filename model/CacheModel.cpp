@@ -20,11 +20,20 @@ CacheHierarchy::Cache::Cache(CacheConfig config, std::uint64_t seed)
     }
     num_sets_ = config_.capacity_bytes /
                 (config_.line_bytes * config_.associativity);
+    if (config_.indexing != "modulo" && config_.indexing != "xor_fold")
+        throw std::invalid_argument("indexing must be modulo or xor_fold");
+    for (auto value = num_sets_ - 1; value; value >>= 1) ++index_bits_;
+}
+
+std::uint64_t CacheHierarchy::Cache::set_index(std::uint64_t line) const {
+    // Generic XOR tag/index folding, not a reverse-engineered NVIDIA set function.
+    if (config_.indexing == "xor_fold" && index_bits_) line ^= line >> index_bits_;
+    return line % num_sets_;
 }
 
 bool CacheHierarchy::Cache::probe(std::uint64_t line, bool mark_dirty) {
     ++clock_;
-    auto found = sets_.find(line % num_sets_);
+    auto found = sets_.find(set_index(line));
     if (found == sets_.end()) {
         return false;
     }
@@ -65,7 +74,7 @@ std::size_t CacheHierarchy::Cache::victim(const std::vector<Entry>& entries) {
 bool CacheHierarchy::Cache::insert(std::uint64_t line, bool dirty,
                                    Entry* evicted) {
     ++clock_;
-    std::vector<Entry>& entries = sets_[line % num_sets_];
+    std::vector<Entry>& entries = sets_[set_index(line)];
     for (Entry& entry : entries) {
         if (entry.line == line) {
             entry.dirty = entry.dirty || dirty;
@@ -120,21 +129,28 @@ void CacheHierarchy::process(const Access& access, bool record, bool capture,
     if (record) {
         ++result->measured_requests;
         result->measured_loads += access.operation == Operation::kLoad;
+        ++result->phases[access.phase].requests;
+        result->phases[access.phase].loads += access.operation == Operation::kLoad;
     }
     const std::uint64_t line = access.address / line_bytes_;
     std::vector<std::size_t> missed;
     std::string hit_level = "OFF";
+    std::size_t hit_index = caches_.size();
     for (std::size_t level = 0; level < caches_.size(); ++level) {
         if (record) {
             ++result->levels[level].accesses;
+            result->levels[level].load_accesses += access.operation == Operation::kLoad;
         }
         const bool compulsory = caches_[level].first_reference(line);
         const bool dirty = access.operation == Operation::kStore && level == 0;
         if (caches_[level].probe(line, dirty)) {
             if (record) {
                 ++result->levels[level].hits;
+                result->levels[level].load_hits += access.operation == Operation::kLoad;
+                result->levels[level].store_hits += access.operation == Operation::kStore;
             }
             hit_level = "L" + std::to_string(level + 1);
+            hit_index = level;
             break;
         }
         if (record) {
@@ -146,8 +162,16 @@ void CacheHierarchy::process(const Access& access, bool record, bool capture,
         }
         missed.push_back(level);
     }
+    if (record) {
+        ++result->phases[access.phase].hit_counts[hit_index];
+        if (hit_index == caches_.size()) {
+            result->offchip_loads += access.operation == Operation::kLoad;
+            result->offchip_stores += access.operation == Operation::kStore;
+        }
+    }
     for (auto it = missed.rbegin(); it != missed.rend(); ++it) {
         const std::size_t level = *it;
+        if (record) ++result->levels[level].fills;
         const bool dirty = access.operation == Operation::kStore && level == 0;
         Entry evicted{};
         if (caches_[level].insert(line, dirty, &evicted) && evicted.dirty) {
@@ -156,7 +180,7 @@ void CacheHierarchy::process(const Access& access, bool record, bool capture,
     }
     if (capture) {
         result->representative = {
-            true, access.operation, access.address, access.size_bytes, hit_level};
+            true, access.operation, access.address, access.size_bytes, hit_level, access.phase};
     }
 }
 
@@ -168,6 +192,7 @@ SimulationResult CacheHierarchy::run(const AccessTrace& trace,
     }
     SimulationResult result;
     result.levels.resize(caches_.size());
+    result.phases.resize(std::max<std::size_t>(1, trace.phases().size()));
     const std::uint64_t total = warmup_accesses + sample_accesses;
     for (std::uint64_t ordinal = 0; ordinal < total; ++ordinal) {
         const bool record = ordinal >= warmup_accesses;

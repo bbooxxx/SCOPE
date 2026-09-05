@@ -5,7 +5,33 @@ from pathlib import Path
 
 from scope.m3d import evaluate_m3d
 from scope.core import load_model_library, select_workload, design_variants
-from scripts.v9_reports import relative_fom_gain
+from scripts.v9_reports import relative_fom_gain, update_readme_example
+
+
+class ReadmeTests(unittest.TestCase):
+    def test_v9_uses_original_system_power_metric(self):
+        root = Path(__file__).resolve().parents[1]
+        config = json.loads((root / "config/scope_v9.json").read_text())
+        for name in ("attention", "ffn"):
+            workload = select_workload(config, name)["workload"]
+            self.assertEqual(workload["power_metric"], "system_average")
+            self.assertEqual(workload["hit_rate_model"]["power_activity_model"],
+                             "legacy_v9_analytical")
+
+    def test_only_example_changes(self):
+        prefix = "# User-edited overview\n\nDeleted sections must stay deleted.\n\n```text\n"
+        suffix = "```\n\nUser-edited footer.\n"
+        before = prefix + "Best cache configuration:\n\n- Power: 1000 uW\n" + suffix
+        example = "Best cache configuration:\n\n- Power: 1.000000 mW\n- FoM (1/ns/mW): 0.1\n"
+        result = update_readme_example(before, example)
+        self.assertEqual(result, prefix + example + suffix)
+        self.assertEqual(update_readme_example(result, example), result)
+
+    def test_ambiguous_or_missing_example_is_rejected(self):
+        fenced = "```\nBest cache configuration:\n- Power: 1 mW\n```\n"
+        for before in ("# Overview\n", fenced + fenced):
+            with self.assertRaises(ValueError):
+                update_readme_example(before, "Best cache configuration:\n")
 
 
 class M3DTests(unittest.TestCase):

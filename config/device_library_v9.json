@@ -116,6 +116,7 @@
     "SOT-MRAM": {
       "family": "MRAM",
       "destiny_cfg": "config/devices/sot_mram.cfg",
+      "sync_destiny_write_cell": true,
       "read_latency": {
         "model": "constant",
         "value_ns": 1

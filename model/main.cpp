@@ -90,6 +90,8 @@ int main(int argc, char** argv) {
         const auto args = arguments(argc, argv);
         scope_model::TraceConfig trace_config;
         trace_config.operator_name = text(args, "operator", "attention");
+        trace_config.trace_kind = text(args, "trace-kind", "legacy_synthetic");
+        trace_config.group_m = number<std::uint64_t>(args, "group-m", trace_config.group_m);
         trace_config.sequence_tokens = number<std::uint64_t>(
             args, "sequence-tokens", trace_config.sequence_tokens);
         trace_config.hidden_size = number<std::uint64_t>(
@@ -124,6 +126,7 @@ int main(int argc, char** argv) {
         const auto capacities_text = split(text(args, "capacities", ""), ',');
         const auto associativity_text = split(text(args, "associativities", ""), ',');
         const auto policies = split(text(args, "policies", ""), ',');
+        const auto indexing = text(args, "indexing", "modulo");
         if (capacities_text.size() != 3 || associativity_text.size() != 3 ||
             policies.size() != 3) {
             throw std::invalid_argument(
@@ -136,12 +139,13 @@ int main(int argc, char** argv) {
                 static_cast<std::size_t>(std::stoull(associativity_text[level])),
                 line_bytes,
                 policies[level],
+                indexing,
             });
         }
 
         const scope_model::AccessTrace trace(trace_config);
         const std::uint64_t warmup = number<std::uint64_t>(
-            args, "warmup-accesses", trace.cycle_accesses());
+            args, "warmup-accesses", trace_config.trace_kind == "tiled" ? 0 : trace.cycle_accesses());
         const std::uint64_t samples = number<std::uint64_t>(
             args, "sample-accesses", trace.cycle_accesses());
         scope_model::CacheHierarchy hierarchy(cache_configs, trace_config.seed);
@@ -153,6 +157,7 @@ int main(int argc, char** argv) {
         std::vector<std::uint64_t> hits;
         std::vector<std::uint64_t> compulsory_misses;
         std::vector<std::uint64_t> noncompulsory_misses;
+        std::vector<std::uint64_t> load_hits, store_hits, load_accesses, fills;
         for (const auto& level : result.levels) {
             hit_rates.push_back(level.accesses
                                     ? static_cast<double>(level.hits) / level.accesses
@@ -163,10 +168,17 @@ int main(int argc, char** argv) {
             hits.push_back(level.hits);
             compulsory_misses.push_back(level.compulsory_misses);
             noncompulsory_misses.push_back(level.noncompulsory_misses);
+            load_hits.push_back(level.load_hits);
+            store_hits.push_back(level.store_hits);
+            load_accesses.push_back(level.load_accesses);
+            fills.push_back(level.fills);
         }
 
         std::cout << std::setprecision(15);
         std::cout << "{\"schema_version\":8"
+                  << ",\"trace_kind\":\"" << trace_config.trace_kind << "\""
+                  << ",\"group_m\":" << trace_config.group_m
+                  << ",\"indexing\":\"" << indexing << "\""
                   << ",\"model\":\"set_associative_trace\""
                   << ",\"operator\":\"" << trace_config.operator_name << "\""
                   << ",\"kernel\":\""
@@ -185,7 +197,8 @@ int main(int argc, char** argv) {
                   << ",\"weight_tile_reuse_issue_groups\":"
                   << std::max<std::uint64_t>(
                          1, std::min<std::uint64_t>(4, trace_config.tile_m / 8))
-                  << ",\"trace_layout\":\"128B cache-line bursts plus operator tile reuse\""
+                  << ",\"trace_layout\":\""
+                  << (trace_config.trace_kind == "tiled" ? "grouped GEMM CTAs and causal FlashAttention; row-major Linear weights [N,K]" : "legacy hashed addresses with burst reuse") << "\""
                   << ",\"working_set_stride_bytes\":"
                   << trace_config.working_set_stride_bytes
                   << ",\"bytes_per_element\":" << trace_config.bytes_per_element
@@ -203,7 +216,7 @@ int main(int argc, char** argv) {
                   << ",\"trace_cycle_accesses\":" << trace.cycle_accesses()
                   << ",\"cycle_access_cap\":" << trace_config.cycle_access_cap
                   << ",\"sampled_tensor_bytes\":" << trace.sampled_tensor_bytes()
-                  << ",\"cold_stream_fraction\":0.015625"
+                  << ",\"cold_stream_fraction\":" << (trace_config.trace_kind == "tiled" ? 0.0 : 0.015625)
                   << ",\"seed\":" << trace_config.seed
                   << ",\"hit_rates\":";
         print_array(hit_rates);
@@ -211,6 +224,12 @@ int main(int argc, char** argv) {
         print_array(accesses);
         std::cout << ",\"hits\":";
         print_array(hits);
+        std::cout << ",\"load_hits\":"; print_array(load_hits);
+        std::cout << ",\"store_hits\":"; print_array(store_hits);
+        std::cout << ",\"load_accesses\":"; print_array(load_accesses);
+        std::cout << ",\"fills\":"; print_array(fills);
+        std::cout << ",\"offchip_loads\":" << result.offchip_loads;
+        std::cout << ",\"offchip_stores\":" << result.offchip_stores;
         std::cout << ",\"compulsory_misses\":";
         print_array(compulsory_misses);
         std::cout << ",\"noncompulsory_misses\":";
@@ -226,10 +245,40 @@ int main(int argc, char** argv) {
                   << "\",\"address\":" << result.representative.address
                   << ",\"size_bytes\":" << result.representative.size_bytes
                   << ",\"tensor\":\""
-                  << tensor_name(result.representative.address)
+                  << (trace_config.trace_kind == "tiled" ? trace.tensor_name(result.representative.address) : tensor_name(result.representative.address))
                   << "\",\"hit_level\":\""
-                  << result.representative.hit_level << "\"}"
-                  << ",\"operator_shape\":{\"sequence_tokens\":"
+                  << result.representative.hit_level << "\",\"phase_index\":"
+                  << result.representative.phase << "}"
+                  << ",\"phases\":[";
+        for (std::size_t i = 0; i < trace.phases().size(); ++i) {
+            if (i) std::cout << ",";
+            const auto& p = trace.phases()[i];
+            const auto& measured = result.phases[i];
+            std::cout << "{\"name\":\"" << p.name << "\",\"begin\":" << p.begin
+                      << ",\"end\":" << p.end << ",\"loads\":" << p.loads << ",\"stores\":" << p.stores
+                      << ",\"measured_requests\":" << measured.requests << ",\"measured_loads\":" << measured.loads
+                      << ",\"hit_counts\":";
+            print_array(std::vector<std::uint64_t>(measured.hit_counts.begin(), measured.hit_counts.end()));
+            std::cout << "}";
+        }
+        std::cout << "],\"debug_accesses\":[";
+        const auto dump_count = number<std::uint64_t>(args, "dump-first", 0);
+        if (dump_count > 100000) throw std::invalid_argument("dump-first must not exceed 100000");
+        for (std::uint64_t i = 0; i < std::min(dump_count, trace.cycle_accesses()); ++i) {
+            if (i) std::cout << ",";
+            const auto access = trace.at(i);
+            std::cout << "{\"op\":\"" << (access.operation == scope_model::Operation::kLoad ? "load" : "store")
+                      << "\",\"address\":" << access.address << ",\"size_bytes\":" << access.size_bytes
+                      << ",\"phase\":" << access.phase << "}";
+        }
+        std::cout << "],\"tensors\":[";
+        for (std::size_t i = 0; i < trace.tensors().size(); ++i) {
+            if (i) std::cout << ",";
+            const auto& t = trace.tensors()[i];
+            std::cout << "{\"name\":\"" << t.name << "\",\"base\":" << t.base
+                      << ",\"bytes\":" << t.bytes << ",\"rows\":" << t.rows << ",\"columns\":" << t.columns << "}";
+        }
+        std::cout << "],\"operator_shape\":{\"sequence_tokens\":"
                   << trace_config.sequence_tokens
                   << ",\"hidden_size\":" << trace_config.hidden_size
                   << ",\"attention_heads\":" << trace_config.attention_heads

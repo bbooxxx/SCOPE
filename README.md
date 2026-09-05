@@ -2,15 +2,13 @@
 
 ## 1. Overview
 
-SCOPE builds on [DESTINY](https://github.com/sparsh0mittal/destiny_3d_cache) to explore heterogeneous caches for embodied-AI workloads. It connects device and array costs to a three-level cache model, estimating average memory-access latency, memory-system power, conditional hit rates, BER and FoM = 1/(latency × power) for OpenVLA-shaped Attention and FFN workloads.
+SCOPE builds on [DESTINY](https://github.com/sparsh0mittal/destiny_3d_cache) to explore heterogeneous caches for embodied-AI workloads. It connects device and array costs to a three-level cache model, estimating memory access latency, power, conditional hit rates, and FoM = 1/(latency × power) for OpenVLA Attention and FFN workloads.
 
-Configure capacity, device, associativity, banks and sense amplifiers in JSON. The independent `features` switches enable or disable `array_nonideal`, `configurable_peripherals` and `m3d`. v9 uses an Elmore MIV ladder, read/write interconnect energy, and staircase footprint. OSFET BTI refresh is disabled. AsyFET-eDRAM uses the existing TFET device parameters.
+Configure capacity, device, associativity, banks and sense amplifiers in JSON. The independent `features` switches enable or disable `array_nonideal`, `configurable_peripherals` and `m3d`.
 
 The [Orin budget](https://www.nvidia.com/content/dam/en-zz/Solutions/gtcf21/jetson-orin/nvidia-jetson-agx-orin-technical-brief.pdf) is one SM-equivalent 192 KiB L1 and a 4 MiB SRAM-area budget split into 1 MiB-equivalent L2 and 3 MiB-equivalent L3; density determines actual capacities. This is a proposed cache hierarchy, not a cycle-accurate Orin GPU.
 
-Results use synthetic addresses informed by tensor sizes and reuse assumptions, not a measured GPU trace. The inherited configuration exposes its 0.15 L3 OSFET latency scale, 0.88 cross-frame reuse assumption and NoC timing parameters; these are behavioral assumptions. MIV independent conduction current defaults to zero until characterized; nonzero current requires a pulse duration. Array footprint defaults to square bank blocks and accepts explicit dimensions. The reported optimum is among the evaluated candidates.
-
-Original SCOPE contributions use MIT; bundled DESTINY/NVSim/CACTI-3DD retain their licenses (see LICENSE and NOTICE). See CONTRIBUTING for changes and validation.
+The C++ trace expands complete projection GEMMs in [grouped CTA order](https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html), causal FlashAttention and SwiGLU traffic. Register/shared-memory accumulation does not generate global loads. `trace_kind`, `group_m`, `indexing` (modulo or generic XOR folding) and warmup are configurable; the default is a cold operator, with no post-hoc hit-rate correction. This is a serialized behavioral schedule, not a GPU capture.
 
 ## 2. Run and example output
 
@@ -24,19 +22,15 @@ python3 scope.py config/scope_v9.json --workload ffn --compare --json-output res
 python3 scripts/v9_reports.py
 ```
 
-The comparison evaluates S-S-S, S-O-O, S-M-M and S-A-O, plus the three feature ablations. Each architecture evaluates the same L2/L3 search targets (read EDP, read dynamic energy, leakage power) and compatible SAs, selecting the highest feasible system FoM. Generated JSON and Markdown reports stay local. To evaluate one explicit path:
+The output is formatted as follows:
 
-```bash
-python3 scope.py config/scope_v9.json --explore --op load --hit-level L3
 ```
-
-Best cache configuration (Attention; FFN differs):
+Best cache configuration:
 
 - L1: SRAM, 192 KiB
-- L2: OSFET-eDRAM, 16 MiB
+- L2: AsyFET-eDRAM, 4 MiB
 - L3: OSFET-eDRAM, 48 MiB
-- Latency: 15.125373 ns (Atten), 20.272265 ns (FFN)
-- Power: 13.176186 mW (Atten), 18.986042 mW (FFN)
-- FoM: 0.00501769426 (Atten), 0.00259814434 (FFN)
-
-FFN configuration: L1 SRAM 192 KiB, L2 AsyFET-eDRAM 4 MiB, L3 OSFET-eDRAM 48 MiB
+- Latency: 3.228609 ns (Atten), 6.558565 ns (FFN)
+- Power: 5.700408 mW (Atten), 8.451484 mW (FFN)
+- FoM (1/ns/mW): 0.0543348758 (Atten), 0.0180409008 (FFN)
+```

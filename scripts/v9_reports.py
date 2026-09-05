@@ -1,6 +1,7 @@
-"""Generate local v9 delivery reports and the README from measured JSON results."""
+"""Generate local v9 delivery reports and the README from simulated JSON results."""
 from pathlib import Path
 import json
+import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +21,14 @@ def relative_fom_gain(candidate, baseline):
         raise ValueError("FoM values must be positive")
     return candidate / baseline - 1.0
 
+def update_readme_example(readme, example):
+    pattern = r"(^```[^\n]*\n)Best cache configuration[^\n]*\n.*?(^```[ \t]*$)"
+    updated, count = re.subn(pattern, lambda match: match[1] + example + match[2],
+                             readme, flags=re.MULTILINE | re.DOTALL)
+    if count != 1:
+        raise ValueError("README must contain exactly one fenced Best cache configuration example")
+    return updated
+
 def snippet(path, marker, lines=10):
     source = (ROOT / path).read_text().splitlines()
     start = next(i for i, line in enumerate(source) if marker in line)
@@ -28,8 +37,15 @@ def snippet(path, marker, lines=10):
 def main():
     reports = {name: json.loads((ROOT / f"results/scope_v9_{name}.json").read_text())
                for name in ("attention", "ffn")}
-    summary, geometry, goals = [], [], []
+    if any(item.get("power_metric") != "system_average"
+           for report in reports.values() for item in report["architecture_comparison"]):
+        raise ValueError("Re-run v9 with power_metric=system_average before generating this report")
+    summary, geometry, goals, activity = [], [], [], []
     for workload, report in reports.items():
+        trace = report["case_reports"]["optimized"]["hit_rate_model"]["trace_metadata"]
+        activity.append([workload, trace["power_activity_model"],
+                         trace["sample_accesses"], trace["power_activity_transactions_per_operator"],
+                         trace["policy_frequency_hz"], trace["memory_access_rate_per_s"]])
         by_case = {item["case"]: item for item in report["architecture_comparison"]}
         for item in report["architecture_comparison"]:
             summary.append([workload, LABELS[item["case"]],
@@ -65,7 +81,10 @@ def main():
                "Required SAO power at unchanged latency (mW, <=)"], goals) + "\n\n" +
         table(["Workload", "Configuration", "Level", "Configured banks",
                "DESTINY mats/bank", "Subarrays/mat", "Cells/subarray",
-               "DESTINY proxy capacity", "Selected search target"], geometry) + "\n")
+               "DESTINY proxy capacity", "Selected search target"], geometry) + "\n\n" +
+        table(["Workload", "Power activity assumption (not full-trace activity)",
+               "Replayed transactions", "Analytical power-budget transactions/operator",
+               "Assumed operator Hz", "Power-budget requests/s"], activity) + "\n")
     winners = {}
     for workload, report in reports.items():
         winner = report["best_evaluated_architecture"]
@@ -77,47 +96,22 @@ def main():
                          for i, (device, cap) in enumerate(zip(a["devices"], a["capacities_bytes"])))
     example += (f'\n- Latency: {a["average_latency_ns"]:.6f} ns (Atten), {f["average_latency_ns"]:.6f} ns (FFN)'
                 f'\n- Power: {a["average_power_mw"]:.6f} mW (Atten), {f["average_power_mw"]:.6f} mW (FFN)'
-                f'\n- FoM: {a["fom_per_ns_mw"]:.9g} (Atten), {f["fom_per_ns_mw"]:.9g} (FFN)\n')
+                f'\n- FoM (1/ns/mW): {a["fom_per_ns_mw"]:.9g} (Atten), {f["fom_per_ns_mw"]:.9g} (FFN)\n')
     if not same:
         example += "\nFFN configuration: " + ", ".join(
             f"L{i+1} {dev} {size(cap)}" for i, (dev, cap) in enumerate(zip(f["devices"], f["capacities_bytes"]))) + "\n"
-    readme = """![SCOPE](assets/scope-banner.png)
-
-## 1. Overview
-
-SCOPE builds on [DESTINY](https://github.com/sparsh0mittal/destiny_3d_cache) to explore heterogeneous caches for embodied-AI workloads. It connects device and array costs to a three-level cache model, estimating average memory-access latency, memory-system power, conditional hit rates, BER and FoM = 1/(latency × power) for OpenVLA-shaped Attention and FFN workloads.
-
-Configure capacity, device, associativity, banks and sense amplifiers in JSON. The independent `features` switches enable or disable `array_nonideal`, `configurable_peripherals` and `m3d`. v9 uses an Elmore MIV ladder, read/write interconnect energy, and staircase footprint. OSFET BTI refresh is disabled. AsyFET-eDRAM uses the existing TFET device parameters.
-
-The [Orin budget](https://www.nvidia.com/content/dam/en-zz/Solutions/gtcf21/jetson-orin/nvidia-jetson-agx-orin-technical-brief.pdf) is one SM-equivalent 192 KiB L1 and a 4 MiB SRAM-area budget split into 1 MiB-equivalent L2 and 3 MiB-equivalent L3; density determines actual capacities. This is a proposed cache hierarchy, not a cycle-accurate Orin GPU.
-
-Results use synthetic addresses informed by tensor sizes and reuse assumptions, not a measured GPU trace. The inherited configuration exposes its 0.15 L3 OSFET latency scale, 0.88 cross-frame reuse assumption and NoC timing parameters; these are behavioral assumptions. MIV independent conduction current defaults to zero until characterized; nonzero current requires a pulse duration. Array footprint defaults to square bank blocks and accepts explicit dimensions. The reported optimum is among the evaluated candidates.
-
-Original SCOPE contributions use MIT; bundled DESTINY/NVSim/CACTI-3DD retain their licenses (see LICENSE and NOTICE). See CONTRIBUTING for changes and validation.
-
-## 2. Run and example output
-
-Requirements: Python 3.10+ and a C++17 compiler; no third-party Python packages are required.
-
-```bash
-make -j2
-python3 -m unittest discover -s tests -v
-python3 scope.py config/scope_v9.json --compare --json-output results/scope_v9_attention.json
-python3 scope.py config/scope_v9.json --workload ffn --compare --json-output results/scope_v9_ffn.json
-python3 scripts/v9_reports.py
-```
-
-The comparison evaluates S-S-S, S-O-O, S-M-M and S-A-O, plus the three feature ablations. Each architecture evaluates the same L2/L3 search targets (read EDP, read dynamic energy, leakage power) and compatible SAs, selecting the highest feasible system FoM. Generated JSON and Markdown reports stay local. To evaluate one explicit path:
-
-```bash
-python3 scope.py config/scope_v9.json --explore --op load --hit-level L3
-```
-
-"""
-    (ROOT / "README.md").write_text(readme + example)
+    readme_path = ROOT / "README.md"
+    readme_path.write_text(update_readme_example(readme_path.read_text(), example))
     revision = "# v9 修改\n\n"
     revision += "Orin：192 KiB L1；4 MiB SRAM 面积按 1:3 分配 L2/L3。AsyFET 沿用原 TFET 参数；OSFET refresh=none。\n\n"
-    revision += "功率使用 $P=\\lambda E$，电阻项为 $I^2Rt$；$I$ 仅表示独立导通电流，不能重复计入充放电电流。默认导通电流为 0，等待器件参数。\n\n"
+    revision += "恢复最初 v9（c87e22d）的系统平均功耗：$P=\\lambda E+P_{static}+P_{refresh}$；FoM=$1/(LP)$。显示 Power（mW），不再用各配置自己的串行服务时间作功耗分母。保留回填、脏逐出等能量统计修正，因此不是恢复旧数值。调用频率沿用5 Hz，同一算子的四配置使用相同访存频率；该频率是活动假设，不是已验证的GPU吞吐率。单次操作的 E/T 仅作诊断，不参与默认排名。\n\n"
+    revision += "本次按用户选择恢复旧活动量近似：power_activity_model=legacy_v9_analytical。Attention/FFN每算子分别按1,917,056/2,373,136次计算，5 Hz对应9,585,280/11,865,680次每秒。完整重放的50,089,216/90,329,028次仍用于命中率与每请求成本估计，不冒充旧活动量计数。最终Power是旧活动预算下的估计，不是完整tile算子以5 Hz运行的预测功耗；所有配置统一该假设。\n\n"
+    revision += "旧公式（BF16、128 B事务，每事务64个元素）：Attention取Q=ceil(S/tile_m)，读元素数4H²+(3+2Q)SH、写元素数5SH；FFN读元素数3HI+2SH+2SI、写元素数2SI+SH。读写分别向上取整转换为事务，再乘调用频率。权重按一次计，不含完整GEMM重放中的重复请求。\n\n"
+    revision += snippet("scope/power.py", '    if operator == "attention":', 14) + "\n"
+    revision += snippet("scope/core.py", '    activity_count = int(raw["trace_cycle_accesses"])', 18) + "\n"
+    revision += snippet("scope/core.py", '        dynamic_power_mw = access_rate', 4) + "\n"
+    revision += snippet("scope/core.py", '        total_power_mw = dynamic_power_mw', 7) + "\n"
+    revision += "电阻项为 $I^2Rt$，其中 $I$ 仅表示独立导通电流，默认 0，避免重复计算充放电电流。\n\n"
     revision += "Elmore：$\\tau_k=0.69\\sum_{i=1}^{k}(\\sum_{j=1}^{i}R_j)C_i$。\n\n"
     revision += snippet("scope/m3d.py", "    delays = ", 8) + "\n"
     revision += "读写能量分别累加，随后由层访问频率转成功率：\n\n"
@@ -129,16 +123,22 @@ python3 scope.py config/scope_v9.json --explore --op load --hit-level L3
     revision += snippet("scope/core.py", '            targets = layer.get(', 11) + "\n"
     revision += "配置文件名包含 line 大小与内容摘要，避免并行测试覆盖；读取已有结果时校验容量、相联度和 line 大小。\n\n"
     revision += snippet("scope/core.py", '    filename = (', 7) + "\n"
-    revision += "验证：34 项单元测试；Attention/FFN 四配置和三开关对比。通过公式与开关断言，不把预定排名作为验收条件。L1 条件相同，其命中率也相同。\n\n"
+    revision += "验证：运行 python3 -m unittest discover -s tests -v；Attention/FFN 四配置和三开关对比。通过公式、独立地址循环、LRU 重放及开关断言，不把预定排名作为验收条件。L1 条件相同，其命中率也相同。\n\n"
     revision += "FoM 增幅按 FoM_SAO/FoM_reference−1 计算；comparison.md 同时列出相对 S-O-O 的 10% 目标、相对 S-S-S 的 80% 目标，以及固定功率或延迟时需要达到的另一指标。这是目标检查，不修改仿真结果。\n\n"
     revision += "来源：Orin technical brief（README 链接）；M3D-MDA Table 1：R=5.5 Ω、C=0.1 fF、pitch=0.2 μm。H/W 默认从等面积正方形 bank 推导，读写摆幅 0.1/1.2 V 为模型输入。\n\n"
-    revision += "保留并公开：L3 0.15 延迟缩放、跨帧 0.88 复用和器件 standby 估算。结果为行为级预测，不是实测。MIT 仅覆盖新增代码，第三方版权保留。\n"
+    revision += "保留并公开：L3 0.15 延迟缩放和器件 standby 估算。移除默认跨帧 0.88 修正，改为完整算子分块地址重放，支持取模/XOR 映射。结果为行为级预测，不是实测。MIT 仅覆盖新增代码，第三方版权保留。\n\n"
+    revision += "FFN核查：SSS 的1 MiB L2遇到128×4096×2 B=1 MiB的权重条带，再叠加输入，发生反复逐出。仅将tile_n从128改为64的诊断重放，L2条件命中由1.0649%变为45.4125%；该实验改变事务数，不直接与默认功耗混用。SOO的48 MiB L3装不下86 MiB的单个FFN权重矩阵，group_m=8使其跨组重复扫描；仅将L3改为96 MiB的诊断重放，L3条件命中由0.3456%变为64.3985%。只改group_m=19，片外到达率从7.3908%降至2.6293%，而L3条件命中仍仅1.9337%。这些是行为级假设的敏感性证据，不是GPU实测，也未覆盖默认参数。不能按L3>L2>L1强行修改命中率。\n\n"
+    revision += "功耗与访存核查的详细解释见 access-audit.md。旧访问期间功率较低不代表更省能量：较长的等待/回填时间会扩大E/T分母，甚至令搜索偏向缓慢阵列。恢复系统功耗后按相同请求速率重新搜索阵列，不能只替换表格数字。\n\n"
+    revision += snippet("scope/power.py", "def access_power_uw", 7) + "\n"
+    revision += snippet("scope/power.py", "def access_power_mw", 2) + "\n"
+    revision += snippet("scope/core.py", "        for path in self._path_probabilities()", 12) + "\n"
     (ROOT / "revision.md").write_text(revision)
     names = subprocess.check_output(
         ["git", "ls-files", "--cached", "--others", "--exclude-standard"], cwd=ROOT, text=True).splitlines()
     names = sorted({p for p in names if (ROOT / p).is_file()})
     descriptions = {
-        "AccessTrace": "生成按工作集和复用参数构造的访存地址。",
+        "AccessTrace": "选择兼容的旧地址模型或完整分块算子地址。",
+        "TiledTrace": "按矩阵分块顺序展开 Attention 和 FFN 的全局访存。",
         "CacheModel": "模拟缓存命中、替换和脏数据回写。",
         "Bank": "描述存储 bank 的公共结构。",
         "BankWithHtree": "计算采用 H 树布线的 bank。",
@@ -169,6 +169,10 @@ python3 scope.py config/scope_v9.json --explore --op load --hit-level L3
         "nonideal": "估算阵列非理想效应与误码。",
         "openvla_trace": "保留早期张量访问生成接口供兼容使用。",
         "v9_reports": "从仿真结果生成本地交付报告和 README。",
+        "power": "提供功率单位换算和原v9访存活动量估算。",
+        "access_audit": "核对访问计数和能量口径，生成本地核查报告。",
+        "plot_v9_comparison": "把四种配置的结果画成对比图。",
+        "v9_sensitivity": "独立扫描参数，保留每种假设对应的结果。",
     }
     def describe(path):
         p = Path(path)

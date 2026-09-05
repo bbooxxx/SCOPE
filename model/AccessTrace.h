@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace scope_model {
 
@@ -13,6 +14,7 @@ struct Access {
     Operation operation;
     std::uint64_t address;
     std::size_t size_bytes;
+    std::size_t phase = 0;
 };
 
 struct TraceConfig {
@@ -33,6 +35,18 @@ struct TraceConfig {
     std::size_t working_set_stride_bytes = 64;
     std::size_t bytes_per_element = 2;
     std::uint64_t seed = 7;
+    std::string trace_kind = "legacy_synthetic";
+    std::uint64_t group_m = 8;
+};
+
+struct TracePhase {
+    std::string name;
+    std::uint64_t begin = 0, end = 0, loads = 0, stores = 0;
+};
+
+struct TraceTensor {
+    std::string name;
+    std::uint64_t base, bytes, rows, columns;
 };
 
 class AccessTrace {
@@ -49,6 +63,9 @@ class AccessTrace {
         return analytical_working_set_bytes_;
     }
     double analytical_read_fraction() const;
+    const std::vector<TracePhase>& phases() const { return phases_; }
+    const std::vector<TraceTensor>& tensors() const { return tensors_; }
+    std::string tensor_name(std::uint64_t address) const;
 
   private:
     std::uint64_t permute(std::uint64_t value, std::uint64_t modulus,
@@ -60,6 +77,20 @@ class AccessTrace {
     std::uint64_t analytical_loads_ = 0;
     std::uint64_t analytical_stores_ = 0;
     std::uint64_t analytical_working_set_bytes_ = 0;
+    struct Segment {
+        std::uint64_t begin, end, base, stride, transactions_per_row;
+        Operation operation;
+        std::size_t phase;
+    };
+    void build_tiled();
+    void rectangle(Operation op, std::uint64_t base, std::uint64_t stride,
+                   std::uint64_t rows, std::uint64_t width_bytes);
+    void gemm(std::uint64_t a, std::uint64_t weight, std::uint64_t output,
+              std::uint64_t m, std::uint64_t n, std::uint64_t k);
+    std::vector<Segment> segments_;
+    std::vector<TracePhase> phases_;
+    std::vector<TraceTensor> tensors_;
+    mutable std::size_t last_segment_ = 0;
 };
 
 }  // namespace scope_model

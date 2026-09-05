@@ -27,6 +27,10 @@ AccessTrace::AccessTrace(TraceConfig config) : config_(std::move(config)) {
     if (config_.operator_name != "attention" && config_.operator_name != "ffn") {
         throw std::invalid_argument("operator must be attention or ffn");
     }
+    if (!config_.sequence_tokens || !config_.hidden_size || !config_.intermediate_size ||
+        !config_.tile_m || !config_.tile_n || !config_.tile_k || !config_.group_m) {
+        throw std::invalid_argument("tensor dimensions and tile sizes must be positive");
+    }
     if (config_.transaction_bytes == 0) {
         config_.transaction_bytes = config_.access_bytes;
     }
@@ -38,6 +42,16 @@ AccessTrace::AccessTrace(TraceConfig config) : config_(std::move(config)) {
         config_.working_set_stride_bytes == 0 ||
         config_.working_set_stride_bytes % config_.access_bytes != 0) {
         throw std::invalid_argument("invalid access geometry");
+    }
+    if (config_.trace_kind == "tiled") {
+        if (config_.sampled_working_set_bytes || config_.cycle_access_cap) {
+            throw std::invalid_argument("tiled trace uses the complete tensor domain; use sample-accesses to bound a run");
+        }
+        build_tiled();
+        return;
+    }
+    if (config_.trace_kind != "legacy_synthetic") {
+        throw std::invalid_argument("trace-kind must be tiled or legacy_synthetic");
     }
 
     const std::uint64_t elements_per_access = std::max<std::uint64_t>(
@@ -108,6 +122,29 @@ std::uint64_t AccessTrace::permute(std::uint64_t value, std::uint64_t modulus,
 }
 
 Access AccessTrace::at(std::uint64_t ordinal) const {
+    if (config_.trace_kind == "tiled") {
+        ordinal %= cycle_accesses_;
+        if (ordinal < segments_[last_segment_].begin ||
+            ordinal >= segments_[last_segment_].end) {
+            if (last_segment_ + 1 < segments_.size() &&
+                ordinal >= segments_[last_segment_ + 1].begin &&
+                ordinal < segments_[last_segment_ + 1].end) {
+                ++last_segment_;
+            } else {
+                last_segment_ = std::lower_bound(
+                    segments_.begin(), segments_.end(), ordinal,
+                    [](const Segment& segment, std::uint64_t value) {
+                        return segment.end <= value;
+                    }) - segments_.begin();
+            }
+        }
+        const auto& segment = segments_[last_segment_];
+        const auto offset = ordinal - segment.begin;
+        return {segment.operation,
+                segment.base + (offset / segment.transactions_per_row) * segment.stride
+                    + (offset % segment.transactions_per_row) * config_.transaction_bytes,
+                config_.transaction_bytes, segment.phase};
+    }
     const std::uint64_t stream_bytes = config_.sampled_working_set_bytes / 2;
     const std::uint64_t stream_lines = stream_bytes / config_.cache_line_bytes;
     const std::uint64_t cycle_ordinal = ordinal % cycle_accesses_;

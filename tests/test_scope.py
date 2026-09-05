@@ -315,7 +315,7 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(large.trace_metadata["isa_access_bytes"], 16)
         self.assertEqual(large.trace_metadata["cache_line_bytes"], 64)
         self.assertEqual(large.trace_metadata["vector_accesses_per_cache_line"], 4)
-        self.assertIn("cache-line bursts", large.trace_metadata["trace_layout"])
+        self.assertIn("legacy hashed addresses", large.trace_metadata["trace_layout"])
         self.assertIn("compulsory_misses", large.trace_metadata)
         self.assertIn("representative_access", large.trace_metadata)
         reuse_model = dict(hit_model)
@@ -813,8 +813,9 @@ class ScopeTests(unittest.TestCase):
         )
         report = model.average()
         self.assertAlmostEqual(report["average_latency_ns"], 7.25)
-        self.assertAlmostEqual(report["expected_dynamic_energy_nj_per_request"], 0.725)
-        self.assertAlmostEqual(report["dynamic_power_mw"], 1.45)
+        # Every missed cache receives a fill, even when fills are buffered.
+        self.assertAlmostEqual(report["expected_dynamic_energy_nj_per_request"], 0.8625)
+        self.assertAlmostEqual(report["dynamic_power_mw"], 1.725)
 
     def test_writeback_energy_is_included_but_not_latency(self) -> None:
         links = [
